@@ -799,6 +799,76 @@ function search(line)
   return pred_sent, nbests
 end
 
+-- Encode: take a seq2seq-attn model and a piece of text (line) and generate
+-- a (1 x length in tokens x encoding size) matrix of the encodings for each token in this
+-- piece of text.
+--
+-- This will be used for computing statistics like correlation between components of the encoding
+-- over the space of inputs.
+function encode(model, line)
+  sent_id = sent_id + 1
+
+  -- Get tokens from string
+  local cleaned_tokens, source_features_str = extract_features(line)
+  local cleaned_line = table.concat(cleaned_tokens, ' ')
+
+  print('SENT ' .. sent_id .. ': ' ..line)
+
+  -- Create the source vectors
+  local source, source_str
+  local source_features = features2featureidx(source_features_str, feature2idx_src, model_opt.start_symbol)
+  if model_opt.use_chars_enc == 0 then
+    source, source_str = sent2wordidx(cleaned_line, word2idx_src, model_opt.start_symbol)
+  else
+    source, source_str = sent2charidx(cleaned_line, char2idx, model_opt.max_word_l, model_opt.start_symbol)
+  end
+  if gold then
+    target, target_str = sent2wordidx(gold[sent_id], word2idx_targ, 1)
+  end
+
+  -- Use the correct gpu if specified
+  if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
+    cutorch.setDevice(opt.gpuid)
+  end
+
+  -- Cap source length (truncate if too long)
+  local source_l = math.min(source:size(1), opt.max_sent_l)
+
+  -- Format source input for encoder
+  local source_input
+  if model_opt.use_chars_enc == 1 then
+    source_input = source:view(source_l, 1, source:size(2)):contiguous()
+  else
+    source_input = source:view(source_l, 1)
+  end
+
+  -- Initialize the encoder RNN state
+  local rnn_state_enc = {}
+  for i = 1, #init_fwd_enc do
+    table.insert(rnn_state_enc, init_fwd_enc[i]:zero())
+  end
+  local context = context_proto[{{}, {1,source_l}}]:clone() -- 1 x source_l x rnn_size
+
+  -- Iterate through the source
+  for t = 1, source_l do
+    -- Input this token
+    local encoder_input = {source_input[t]}
+    -- Add any auxiliary features provided
+    if model_opt.num_source_features > 0 then
+      append_table(encoder_input, source_features[t])
+    end
+    -- Add all of the pieces of RNN state
+    append_table(encoder_input, rnn_state_enc)
+
+    -- Run one layer forward
+    local out = model[1]:forward(encoder_input)
+    rnn_state_enc = out
+    context[{{},t}]:copy(out[#out])
+  end
+
+  return context
+end
+
 function getOptions()
   return opt
 end
