@@ -805,7 +805,7 @@ end
 --
 -- This will be used for computing statistics like correlation between components of the encoding
 -- over the space of inputs.
-function encode(model, line)
+function encode(line)
   sent_id = sent_id + 1
 
   -- Get tokens from string
@@ -876,5 +876,6 @@ end
 return {
   init = init,
   search = search,
+  encode = encode,
   getOptions = getOptions
 }
