@@ -6,6 +6,7 @@ require 'cutorch'
 require 'nn'
 require 'cunn'
 
+-- Normalize a sample to have mean 0
 function normalize_mean(X)
   local N = X:clone()
 
@@ -19,17 +20,22 @@ function normalize_mean(X)
 
   print('Mean should be zero:')
   M = N:sum(1):mul(1 / w)
-  print(M)
-
-  -- Normalize to standard deviation 1
-  --[[
-  local S = N:clone():pow(2):sum(1):mul(1 / w):sqrt()
-  N:cdiv(
-    S:view(1, h):expand(w, h)
-  )
-  ]]
 
   return N
+end
+
+-- Normalize a sample to have standard deviation 1
+function normalize_stdev(N)
+  local Q = N:clone()
+
+  local w, h = N:size(1), N:size(2)
+
+  local S = Q:clone():pow(2):sum(1):mul(1 / w):sqrt()
+  Q:cdiv(
+    S:view(1, h):expand(w, h)
+  )
+
+  return Q
 end
 
 function covariance_matrix(A, B) -- samples x sizeA, samples x sizeB
@@ -97,33 +103,50 @@ function main()
   local nA = normalize_mean(encodings_A)
   local nB = normalize_mean(encodings_B)
 
+  print('Should have A == B', torch.max(torch.abs(encodings_A - encodings_B)))
+
   -- All covariance matrices
   local c_AA = covariance_matrix(nA, nA)
   local c_AB = covariance_matrix(nA, nB)
   local c_BA = covariance_matrix(nB, nA)
   local c_BB = covariance_matrix(nB, nB)
 
+  print('Should be equal:')
+  print('AA == AB', torch.max(torch.abs(c_AA - c_AB)))
+  print('AA == BA', torch.max(torch.abs(c_AA - c_BA)))
+  print('AA == AB', torch.max(torch.abs(c_AA - c_BB)))
+
   local ic_AA = torch.inverse(c_AA)
   local ic_BB = torch.inverse(c_BB)
 
   local cca_matrix = ic_AA * c_AB * ic_BB * c_BA
 
+  print('cca matrix should currently be the identity:')
+  print(cca_matrix)
+
   local e = torch.eig(cca_matrix)
+
+  print('Eigenvalues follow.')
+  print(e)
+  print(e:narrow(2, 1, 1))
+
+  local qA = normalize_stdev(nA)
+  local qB = normalize_stdev(nB)
 
   -- Compute the basis change
   print('computing basis change (forward)')
-  local basis_change_forward, forward_residual = torch.gels(encodings_B, encodings_A)
+  local basis_change_forward, forward_residual = torch.gels(qB, qA)
   print('computing basis change (backward)')
-  local basis_change_backward, backward_residual = torch.gels(encodings_A, encodings_B)
+  local basis_change_backward, backward_residual = torch.gels(qA, qB)
 
   -- Mean squared error:
   print('computing mse')
   local forward_mse = torch.sum(torch.pow(
-      torch.csub(torch.mm(basis_change_forward, encodings_A:t()), encodings_B:t()), -- residuals
+      torch.csub(torch.mm(basis_change_forward, qA:t()), qB:t()), -- residuals
       2
     ), 2):mul(1 / sample_length)
   local backward_mse = torch.sum(torch.pow(
-      torch.csub(torch.mm(basis_change_backward, encodings_B:t()), encodings_A:t()), -- residuals
+      torch.csub(torch.mm(basis_change_backward, qB:t()), qA:t()), -- residuals
       2
     ), 2):mul(1 / sample_length)
 

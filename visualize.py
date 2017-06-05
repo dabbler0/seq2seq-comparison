@@ -42,6 +42,7 @@ p4.bar(numpy.arange(500), mses)
 p5.matshow(comparison_file.correlation_AB.numpy())
 
 p6.set_title('Canonical Correlations')
+print(comparison_file.cca_magnitudes.numpy())
 p6.plot(numpy.sqrt(comparison_file.cca_magnitudes.numpy()))
 
 f.subplots_adjust(hspace=0.3)
