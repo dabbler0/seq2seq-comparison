@@ -24,26 +24,28 @@ p1.matshow(comparison_file.basis_change_forward.numpy())
 
 p2.set_title('Forward MSE per component (sorted)')
 indices = numpy.arange(500)
-mses = comparison_file.forward_mse.numpy()
+mses = numpy.ndarray.flatten(comparison_file.forward_mse.numpy())
 indices = sorted(indices, key = lambda x: mses[x])
+print('THE SORTED FORWARD INDICES:')
+print('\n'.join(list(map(lambda i: '%d\t%f' % (i, mses[i]), indices))))
 mses = sorted(mses)
-
 p2.bar(numpy.arange(500), mses)
 
 p3.matshow(comparison_file.basis_change_backward.numpy())
 
 p4.set_title('Backward MSE per component (sorted)')
 indices = numpy.arange(500)
-mses = comparison_file.backward_mse.numpy()
+mses = numpy.ndarray.flatten(comparison_file.backward_mse.numpy())
 indices = sorted(indices, key = lambda x: mses[x])
+print('THE SORTED BACKWARD INDICES:')
+print('\n'.join(list(map(lambda i: '%d\t%f' % (i, mses[i]), indices))))
 mses = sorted(mses)
 p4.bar(numpy.arange(500), mses)
 
 p5.matshow(comparison_file.correlation_AB.numpy())
 
 p6.set_title('Canonical Correlations')
-print(comparison_file.cca_magnitudes.numpy())
-p6.plot(numpy.sqrt(comparison_file.cca_magnitudes.numpy()))
+p6.plot(numpy.sort((numpy.sqrt(comparison_file.cca_magnitudes.numpy())), axis=None))
 
 f.subplots_adjust(hspace=0.3)
 

@@ -1,0 +1,87 @@
+<html>
+<head>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.6.0/Chart.js"></script>
+</head>
+<body>
+<script>
+$.get('all-comparisons.json', function(data) {
+    var element = document.createElement('table');
+    document.body.appendChild(element);
+
+    var models = [];
+    for (var source in data) {
+      models.push(source);
+    }
+    models.sort();
+
+    var label_row = document.createElement('tr');
+    label_row.appendChild(document.createElement('td'));
+    for (var i = 0; i < models.length; i += 1) {
+      var target = models[i];
+      var label_td = document.createElement('td');
+      var label_td = document.createElement('td');
+      label_td.innerText = target.split('/').reverse()[0];
+      label_row.appendChild(label_td);
+    }
+    element.appendChild(label_row);
+
+    for (var q = 0; q < models.length; q += 1) {
+      var source = models[q];
+      // Each row corresponds to one source
+      var row = document.createElement('tr');
+      var label_td = document.createElement('td');
+      label_td.innerText = source.split('/').reverse()[0];
+      row.appendChild(label_td);
+
+      element.appendChild(row);
+
+      for (var w = 0; w < models.length; w += 1) {
+        var target = models[w];
+        // Sort the data
+        var mses = data[source][target][0];
+        mses.sort();
+
+        //console.log(Math.max.apply(this, mses));
+        console.log(mses);
+
+        // Create a chart out of the sorted data
+        var canvas = document.createElement('canvas')
+        canvas.width = canvas.height = 200;
+        var data_td = document.createElement('td');
+        row.appendChild(data_td);
+        data_td.appendChild(canvas);
+
+        /*
+        * So apparently chart.js sucks let's not use it
+        */
+        /*
+        setTimeout((function(canvas, mses) { return function() {
+          var ctx = canvas.getContext('2d')
+          var chart = new Chart(ctx, {
+            type: 'line',
+            data: mses,
+            options: {
+              line: {
+                tension: 0
+              }
+            }
+          });
+          } }(canvas, mses)), 0);
+        */
+        var ctx = canvas.getContext('2d');
+        ctx.beginPath();
+        ctx.moveTo(0, canvas.height);
+        for (var i = 0; i < mses.length; i += 1) {
+          ctx.lineTo(i / 500 * canvas.width, (1 - mses[i]) * canvas.height);
+        }
+        ctx.lineTo(canvas.width, canvas.height);
+        ctx.strokeColor = ctx.fillColor = '#000';
+        ctx.stroke();
+        ctx.fill();
+      }
+    }
+});
+</script>
+</body>
+</html>

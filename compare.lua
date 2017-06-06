@@ -121,34 +121,31 @@ function main()
 
   local cca_matrix = ic_AA * c_AB * ic_BB * c_BA
 
-  print('cca matrix should currently be the identity:')
-  print(cca_matrix)
-
   local e = torch.eig(cca_matrix)
-
-  print('Eigenvalues follow.')
-  print(e)
-  print(e:narrow(2, 1, 1))
 
   local qA = normalize_stdev(nA)
   local qB = normalize_stdev(nB)
 
   -- Compute the basis change
   print('computing basis change (forward)')
-  local basis_change_forward, forward_residual = torch.gels(qB, qA)
+  local basis_change_forward = torch.gels(qB, qA)
+
   print('computing basis change (backward)')
-  local basis_change_backward, backward_residual = torch.gels(qA, qB)
+  local basis_change_backward = torch.gels(qA, qB)
+
+  print(#basis_change_forward)
+  print(#basis_change_backward)
 
   -- Mean squared error:
   print('computing mse')
   local forward_mse = torch.sum(torch.pow(
-      torch.csub(torch.mm(basis_change_forward, qA:t()), qB:t()), -- residuals
+      torch.csub(torch.mm(qA, basis_change_forward), qB), -- residuals
       2
-    ), 2):mul(1 / sample_length)
+    ), 1):mul(1 / sample_length)
   local backward_mse = torch.sum(torch.pow(
-      torch.csub(torch.mm(basis_change_backward, qB:t()), qA:t()), -- residuals
+      torch.csub(torch.mm(qB, basis_change_backward), qA), -- residuals
       2
-    ), 2):mul(1 / sample_length)
+    ), 1):mul(1 / sample_length)
 
   -- Save the measurements
   torch.save(opt.out_file, {
