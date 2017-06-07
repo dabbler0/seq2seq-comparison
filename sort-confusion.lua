@@ -21,29 +21,41 @@ function main()
   local comparisons = torch.load(opt.comp_file)
 
   -- Sort mses
-  local mses, indices = torch.sort(comparisons['backward_mse'], 1, true)
+  local mses, confusing_indices = torch.sort(comparisons['backward_mse'], 1, true)
 
   -- Get most confusing index
-  local confusing_index = indices[0]
-  print('Sorting by confusing index', indices[0], mses[0])
 
-  -- Construct the sentence encodings
-  local activations_to_sort = torch.Tensor(indices:size(1))
-  for i=1,#encodings do
-    local line_encodings = encodings[i]
-    local sentence_encoding = line_encodings[line_encodings:size[1]]
-    activations_to_sort[i] = sentence_encoding[confusing_index]
-  end
+  local all_outputs = {}
+  for k=1,confusing_indices:size(1) do
+    local confusing_index = confusing_indices[k]
 
-  -- Sort activations and indices
-  local activations, indices = torch.sort(activations_to_sort[i], 1, true)
-  local output = {}
-  for i=1,indices:size(1) do
-    table.insert(output, {
-      ['index']=indices[i],
-      ['activation']=activations[i]
+    print('Sorting by confusing index', confusing_indices[0], mses[0])
+
+    -- Construct the sentence encodings
+    local activations_to_sort = torch.Tensor(indices:size(1))
+    for i=1,#encodings do
+      local line_encodings = encodings[i]
+      local sentence_encoding = line_encodings[line_encodings:size[1]]
+      activations_to_sort[i] = sentence_encoding[confusing_index]
+    end
+
+    -- Sort activations and indices
+    local activations, indices = torch.sort(activations_to_sort[i], 1, true)
+    local output = {}
+    for i=1,indices:size(1) do
+      table.insert(output, {
+        ['index']=indices[i],
+        ['activation']=activations[i]
+      })
+    end
+
+    all_outputs[confusing_index] = {
+      ['confusion']=mses[k]
+      ['sorting']=output
     })
   end
+
+  confusing_indices[0]
 
   -- Log some confusing sentences:
   lines = {}
