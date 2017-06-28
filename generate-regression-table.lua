@@ -70,22 +70,31 @@ function main()
   -- and extract sentence encodings, and normalize them
   -- to have standard deviation 1 and mean 0.
   local encodings = {}
+  local indices_used = {}
   for i=1,#filenames do
     local filename = filenames[i]
     print('Reading out:', filename)
-    local all_embeddings = torch.load(filename)['encodings']
+    local data = torch.load(filename)
+    local all_embeddings = data['encodings']
+    local sample_length = data['sample_length']
+
     print('Done.')
     print('Normalizing:', filename)
 
-    local sample_length = #all_embeddings
+    --local sample_length = #all_embeddings
     local rnn_size = all_embeddings[1]:size(2)
 
     local new_encoding = torch.Tensor(sample_length, rnn_size):zero()
 
-    for i=1,sample_length do
+    local k = 1
+    for i=1,#all_embeddings do
       local vector = all_embeddings[i]
-      local last_element = vector[vector:size(1)]
-      new_encoding[i] = nn.utils.recursiveType(last_element, 'torch.DoubleTensor')
+
+      for j=1,vector:size(1) do
+        local element = vector[j]
+        new_encoding[k] = nn.utils.recursiveType(element, 'torch.DoubleTensor')
+        k = k + 1
+      end
     end
 
     -- Normalize

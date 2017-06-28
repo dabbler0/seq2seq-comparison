@@ -7,6 +7,7 @@ require 'cutorch'
 require 'nn'
 require 'cunn'
 require 'json'
+pca = require 'pca'
 
 -- Normalize a sample to have mean 0
 function normalize_mean(X)
@@ -88,11 +89,19 @@ function main()
       new_encoding[i] = nn.utils.recursiveType(last_element, 'torch.DoubleTensor')
     end
 
-    -- Normalize
-    local normalized_new_encoding = normalize_stdev(normalize_mean(new_encoding))
+    -- Whiten
+    new_encoding = normalize_mean(new_encoding)
+    new_encoding = normalize_stdev(new_encoding)
+
+    print('(packed encodings)')
+
+    -- Normalize with PCA to get uncorrelated components.
+    local normalized_new_encoding = pca(new_encoding:t(), 500, true, false)
 
     encodings[filename] = normalized_new_encoding
   end
+
+  print(encodings)
 
   -- Now create the entire LSLR MSE table.
   comparison_table = {}
@@ -109,6 +118,8 @@ function main()
         torch.csub(torch.mm(encoding_A, basis_change_matrix), encoding_B),
         2
       ), 1)
+
+      print(mse)
 
       -- Extract MSE into a Lua table
       -- and put it into the big mapping table

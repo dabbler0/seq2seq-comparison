@@ -805,7 +805,7 @@ end
 --
 -- This will be used for computing statistics like correlation between components of the encoding
 -- over the space of inputs.
-function encode(line)
+function encode(line, layer)
   sent_id = sent_id + 1
 
   -- Get tokens from string
@@ -831,8 +831,13 @@ function encode(line)
     cutorch.setDevice(opt.gpuid)
   end
 
-  -- Cap source length (truncate if too long)
-  local source_l = math.min(source:size(1), opt.max_sent_l)
+  -- Cap source length
+  local source_l
+  if source:size(1) > opt.max_sent_l then
+    return nil
+  else
+    source_l = source:size(1)
+  end
 
   -- Format source input for encoder
   local source_input
@@ -863,7 +868,7 @@ function encode(line)
     -- Run one layer forward
     local out = model[1]:forward(encoder_input)
     rnn_state_enc = out
-    context[{{},t}]:copy(out[#out])
+    context[{{},t}]:copy(out[layer])
   end
 
   return context

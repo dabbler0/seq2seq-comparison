@@ -4,6 +4,9 @@
 -- Run this on the same input file for multiple models in order to do a representation
 -- comparison.
 require 'cutorch'
+
+require 'nn'
+
 local beam = require 's2sa.beam'
 
 function main()
@@ -19,24 +22,13 @@ function main()
 
   -- Encode each line in the input sample file
   for line in file:lines() do
-    encoding = beam.encode(line)
-    table.insert(encodings, encoding[1]:cuda()) -- encoding[1] should be size_l x rnn_size
-    total_token_length = total_token_length + encoding:size()[2]
-  end
-
-  -- Get the average
-  mean = torch.Tensor(encodings[1]:size()[2]):zero():cuda()
-  for i=1,#encodings do
-    encoding = encodings[i]
-    mean:add(1 / total_token_length, torch.sum(encoding, 1))
-  end
-
-  -- Get the stdev
-  stdev = torch.Tensor(encodings[1]:size()[2]):zero():cuda()
-  for i=1,#encodings do
-    encoding = encodings[i]
-    for j=1,encoding:size()[1] do
-      stdev:add(1 / total_token_length, torch.pow(torch.add(encoding[j], -1, mean), 2))
+    encoding = beam.encode(line, 3)
+    if encoding ~= nil then
+      table.insert(encodings, nn.utils.recusriveType(encoding[1], 'torch.DoubleTensor')) -- encoding[1] should be size_l x rnn_size
+      total_token_length = total_token_length + encoding:size()[2]
+    else
+      print('Skipping line because it is too long:')
+      print(line)
     end
   end
 
@@ -45,8 +37,6 @@ function main()
   -- Save the encodings
   torch.save(opt.output_file, {
     ['encodings'] = encodings,
-    ['mean'] = mean,
-    ['stdev'] = stdev,
     ['sample_length'] = total_token_length
   })
 end
