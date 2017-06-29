@@ -1,0 +1,119 @@
+<html>
+<head>
+</head>
+<body>
+<div>
+  <select id="network">
+    <option value="en-es-0">English-Spanish</option>
+    <option value="en-fr-0">English-French</option>
+    <option value="en-ar-0">English-Arabic</option>
+    <option value="en-ru-0">English-Russian</option>
+    <option value="en-zh-0">English-Chinese</option>
+  </select>
+  <input id="index" placeholder="Neuron index"/>
+  <input id="psize" placeholder="Perturbation size"/>
+  <button id="go">Compute saliency map</button>
+</div>
+  <div>
+    <textarea id="sentence" style="width:100%;"></textarea>
+  </div>
+
+  <div id="output">
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+  <script>
+$('#go').click(function() {
+    $.get(
+      '/visualize',
+      {
+        'network': $('#network').val(),
+        'index': $('#index').val(),
+        'sentence': $('#sentence').val(),
+        'perturbation_size': $('#psize').val()
+      },
+      function(data) {
+        // Clear output
+        output = $('<div>')
+        $('#output').append(output);
+
+        console.log(data);
+
+        // Create a visualization element for each parsed token
+        var elements = []
+        for (var i = 0; i < data.activations.length; i++) {
+          elements.push($('<span>').text(data.tokens[i] + ' '));
+            output.append(elements[i]);
+        }
+
+        function original_colors() {
+          for (var i = 0; i < data.activations.length; i++) {
+            // Determine color
+            var activation = data.activations[i], r, g, b, a;
+            if (activation > 0) {
+              r = 255;
+              g = 0;
+              b = 0;
+              a = 1 - Math.pow(0.5, activation);
+            }
+            else {
+              r = 0;
+              g = 0;
+              b = 255;
+              a = 1 - Math.pow(0.5, -activation);
+            }
+
+            // Set color
+            elements[i].css('background-color', 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')');
+          }
+        }
+
+        original_colors()
+
+        for (var j = 0; j < data.activations.length; j++) {
+          elements[j].mouseover(function(j) {
+            return function() {
+              for (var i = 0; i < data.activations.length; i++) {
+                if (i <= j) {
+                  // Determine color
+                  var activation, r, g, b, a;
+
+                  if (i == j) {
+                    activation = data.activations[j];
+                  }
+                  else {
+                    activation = data.saliencies[j][i];
+                  }
+                  if (activation > 0) {
+                    r = 255;
+                    g = 0;
+                    b = 0;
+                    a = 1 - Math.pow(0.5, activation);
+                  }
+                  else {
+                    r = 0;
+                    g = 0;
+                    b = 255;
+                    a = 1 - Math.pow(0.5, -activation);
+                  }
+
+                  // Set color
+                  elements[i].css('background-color', 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')');
+                }
+                else if (i == j) {
+                  elements[i].css('background-color', '#0F0');
+                }
+                else {
+                  elements[i].css('background-color', '#888');
+                }
+              }
+            };
+          }(j));
+
+          elements[j].mouseout(original_colors);
+        }
+      }
+    );
+});
+  </script>
+</body>
+</html>
