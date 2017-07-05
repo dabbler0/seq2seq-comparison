@@ -2,6 +2,9 @@ require 'nn'
 require 'string'
 require 'nngraph'
 
+require 'cutorch'
+require 'cunn'
+
 require 's2sa.models'
 require 's2sa.data'
 require 's2sa.scorer'
@@ -842,15 +845,15 @@ function encode(line, layer)
   -- Format source input for encoder
   local source_input
   if model_opt.use_chars_enc == 1 then
-    source_input = source:view(source_l, 1, source:size(2)):contiguous()
+    source_input = source:view(source_l, 1, source:size(2)):contiguous():cuda()
   else
-    source_input = source:view(source_l, 1)
+    source_input = source:view(source_l, 1):cuda()
   end
 
   -- Initialize the encoder RNN state
   local rnn_state_enc = {}
   for i = 1, #init_fwd_enc do
-    table.insert(rnn_state_enc, init_fwd_enc[i]:zero())
+    table.insert(rnn_state_enc, init_fwd_enc[i]:zero():cuda())
   end
   local context = context_proto[{{}, {1,source_l}}]:clone() -- 1 x source_l x rnn_size
 
@@ -868,6 +871,7 @@ function encode(line, layer)
     -- Run one layer forward
     local out = model[1]:forward(encoder_input)
     rnn_state_enc = out
+    if layer == nil then layer = #out end -- By default take the last element
     context[{{},t}]:copy(out[layer])
   end
 

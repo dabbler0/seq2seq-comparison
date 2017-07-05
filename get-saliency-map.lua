@@ -101,7 +101,9 @@ function get_all_saliencies(encoder_clones, normalizer, opt, alphabet, neuron, s
   end
 
   -- Gradient-retrieval function
-  function get_gradient(all_params, length)
+  function get_gradient(all_params, length, perfect)
+    if perfect == nil then perfect = false end
+
     grad_params:zero()
 
     local softmax = {}
@@ -128,7 +130,12 @@ function get_all_saliencies(encoder_clones, normalizer, opt, alphabet, neuron, s
     local rnn_state = first_hidden
     local encoder_inputs = {}
     for t=1,length do
-      local encoder_input = {softmax[t]:forward(current_source[t])}
+      local encoder_input = nil
+      if perfect then
+        encoder_input = {current_source[t]}
+      else
+        encoder_input = {softmax[t]:forward(current_source[t])}
+      end
       append_table(encoder_input, rnn_state)
       encoder_inputs[t] = encoder_input
       rnn_state = encoder_clones[t]:forward(encoder_input)
@@ -160,9 +167,15 @@ function get_all_saliencies(encoder_clones, normalizer, opt, alphabet, neuron, s
     for t=length,1,-1 do
       local encoder_input_gradient = encoder_clones[t]:backward(encoder_inputs[t], rnn_state_gradients[t])
       -- Get source gradients and copy into gradient array
-      grad_params:narrow(1, 1 + (t-1)*alphabet_size, alphabet_size):copy(
-        softmax[t]:backward(current_source[t], encoder_input_gradient[1])
-      )
+      if perfect then
+        grad_params:narrow(1, 1 + (t-1)*alphabet_size, alphabet_size):copy(
+          encoder_input_gradient[1]
+        )
+      else
+        grad_params:narrow(1, 1 + (t-1)*alphabet_size, alphabet_size):copy(
+          softmax[t]:backward(current_source[t], encoder_input_gradient[1])
+        )
+      end
       -- Get RNN state gradients
       rnn_state_gradients[t-1] = slice_table(encoder_input_gradient, 2)
     end
@@ -186,10 +199,13 @@ function get_all_saliencies(encoder_clones, normalizer, opt, alphabet, neuron, s
     for i=1,num_perturbations do
       -- Give all the other parameters a little bit of probability
       all_params:uniform():mul(perturbation_size / alphabet_size)
+      -- all_params:zero() -- Zero it for softmax
+      -- all_params:uniform()
 
       -- Start at a given sentence
       for t=1,length do
-        current_source[t][1][sentence[t]] = 1
+        current_source[t][1][sentence[t]] = 1 -- perturbation_size
+        -- e^x will be just a little bit more than all the other probabilities combined
       end
 
       get_gradient(all_params, length)
@@ -210,7 +226,7 @@ function get_all_saliencies(encoder_clones, normalizer, opt, alphabet, neuron, s
     for t=1,length do
       current_source[t][1][sentence[t]] = 1
     end
-    local loss = get_gradient(all_params, length)
+    local loss = get_gradient(all_params, length, true)
     table.insert(activations, loss)
 
     affinities[length] = affinity

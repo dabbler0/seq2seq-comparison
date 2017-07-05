@@ -22,17 +22,15 @@ function main()
 
   -- Encode each line in the input sample file
   for line in file:lines() do
-    encoding = beam.encode(line, 3)
+    encoding = beam.encode(line)
     if encoding ~= nil then
-      table.insert(encodings, nn.utils.recusriveType(encoding[1], 'torch.DoubleTensor')) -- encoding[1] should be size_l x rnn_size
+      table.insert(encodings, nn.utils.recursiveType(encoding[1], 'torch.DoubleTensor')) -- encoding[1] should be size_l x rnn_size
       total_token_length = total_token_length + encoding:size()[2]
     else
       print('Skipping line because it is too long:')
       print(line)
     end
   end
-
-  stdev:sqrt()
 
   -- Save the encodings
   torch.save(opt.output_file, {
