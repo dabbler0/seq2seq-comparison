@@ -642,6 +642,7 @@ function init(arg)
   -- load model and word2idx/idx2word dictionaries
   model, model_opt = checkpoint[1], checkpoint[2]
   for i = 1, #model do
+    model[i]:cuda() -- remove for compatability if needed
     model[i]:evaluate()
   end
   -- for backward compatibility

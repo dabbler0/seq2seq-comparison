@@ -39,6 +39,13 @@ function normalize_stdev(N)
 end
 
 function train_nonlinear_predictor(A, hiddens, B, batch_size, epochs)
+
+  -- Split A and B in to training and test sets
+  testA = A:narrow(1, 1, math.floor(A:size(1) / 2))
+  A = A:narrow(1, math.floor(A:size(1) / 2), math.ceil(A:size(1) / 2))
+  testB = B:narrow(1, 1, math.floor(B:size(1) / 2))
+  B = B:narrow(1, math.floor(B:size(1) / 2), math.ceil(B:size(1) / 2))
+
   -- Construct simple one-layer neural network
   local network = nn.Sequential()
   network:add(nn.Linear(A:size(1), hiddens))
@@ -51,7 +58,7 @@ function train_nonlinear_predictor(A, hiddens, B, batch_size, epochs)
   -- Get parameters
   local params, grad_params = network.getParameters()
 
-  -- Do several SGD passes
+  -- Do several Adam optimization passes
   local full_epochs = 0
   local order = torch.randperm(A:size(1))
   local index = 1
@@ -97,11 +104,9 @@ function train_nonlinear_predictor(A, hiddens, B, batch_size, epochs)
   end
 
   -- Do one forward pass to get error
-  local total_prediction = network:forward(A)
+  local total_prediction = network:forward(testA)
 
-  (total_prediction - B):pow(2):mean(1):sqrt()
-
-  return loss
+  return (total_prediction - testB):pow(2):mean(1):sqrt()
 end
 
 function covariance_matrix(A, B) -- samples x sizeA, samples x sizeB
@@ -186,6 +191,8 @@ function main()
           50,
           13
         )
+
+        print(mse)
 
         -- Extract MSE into a Lua table
         -- and put it into the big mapping table
