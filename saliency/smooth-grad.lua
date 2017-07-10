@@ -1,4 +1,34 @@
-function smooth_grad(encoder_clones, normalizer, opt, alphabet, neuron, sentence, num_perturbations, perturbation_size)
+function append_table(dst, src)
+  for i = 1, #src do
+    table.insert(dst, src[i])
+  end
+end
+
+function slice_table(t, index)
+  result = {}
+  for i=index,#t do
+    table.insert(result, t[i])
+  end
+  return result
+end
+
+function smooth_grad(
+    opt,
+    alphabet,
+    encoder_clones,
+    normalizer,
+    neuron,
+    sentence,
+    num_perturbations,
+    perturbation_size)
+
+
+  print(normalizer)
+
+  -- Default arguments
+  if num_perturbations == nil then num_perturbations = 3 end
+  if perturbation_size == nil then perturbation_size = 11 end
+
   local alphabet_size = #alphabet
   local length = #sentence
 
@@ -46,8 +76,8 @@ function smooth_grad(encoder_clones, normalizer, opt, alphabet, neuron, sentence
     for i=1,length do
       local layer = nn.Sequential()
       -- Softmax layer (currently unused in favor of Normalize)
-      --layer:add(nn.SoftMax())
-      layer:add(nn.Normalize(1))
+      layer:add(nn.SoftMax())
+      --layer:add(nn.Normalize(1))
 
       table.insert(softmax, layer:cuda())
     end
@@ -122,13 +152,13 @@ function smooth_grad(encoder_clones, normalizer, opt, alphabet, neuron, sentence
   local length = #sentence
   for i=1,num_perturbations do
     -- Give all the other parameters a little bit of probability
-    all_params:uniform():mul(perturbation_size / alphabet_size)
+    all_params:uniform() --:mul(perturbation_size / alphabet_size)
     -- all_params:zero() -- Zero it for softmax
     -- all_params:uniform()
 
     -- Start at a given sentence
     for t=1,length do
-      current_source[t][1][sentence[t]] = 1 -- perturbation_size
+      current_source[t][1][sentence[t]] = perturbation_size
       -- e^x will be just a little bit more than all the other probabilities combined
     end
 

@@ -1,7 +1,90 @@
+function append_table(dest, inp)
+  for i=1,#inp do
+    table.insert(dest, inp[i])
+  end
+
+  return dest
+end
+
+function slice_table(src, index)
+  local result = {}
+  for i=index,#src do
+    table.insert(result, src[i])
+  end
+  return result
+end
+
+function LRP_saliency(
+    opt,
+    alphabet,
+    encoder_clones,
+    normalizer,
+    neuron,
+    sentence)
+
+  -- Construct beginning hidden state
+  local first_hidden = {}
+  for i=1,2*opt.num_layers do
+    table.insert(first_hidden, torch.Tensor(1, opt.rnn_size):zero():cuda())
+  end
+
+  -- Create one-hot encoding for each sentence
+  local one_hots = {}
+  for t=1,#sentence do
+    one_hots[t] = torch.Tensor(1, #alphabet):cuda()
+    one_hots[t][1][sentence[t]] = 1 -- one-hot encoding
+  end
+
+  -- Forward pass
+  local rnn_state = first_hidden
+  for t=1,#sentence do
+    local encoder_input = {one_hots[t]}
+    append_table(encoder_input, rnn_state)
+    rnn_state = encoder_clones[t]:forward(encoder_input)
+  end
+
+  -- Construct relevance with desired neuron
+  local relevances = {}
+  for i=1,2*opt.num_layers do
+    table.insert(relevances, torch.Tensor(1, opt.rnn_size):zero():cuda())
+  end
+
+  -- Inject relevance at desired neuron
+  relevances[#relevances][1][neuron] = 1 / normalizer[2][1][neuron] -- stdev for normalization
+
+  -- Propagate relevance
+  local relevance_state = relevances
+  local input_relevances = {}
+  for t=#sentence,1,-1 do
+    relevance_state = LRP(encoder_clones[t], relevance_state)
+    input_relevances[t] = relevance_state[1][1][sentence[t]]
+    print('I just put in the input relevance', relevance_state[1][1][sentence[t]])
+    relevance_state = slice_table(relevance_state, 2)
+    print(input_relevances)
+  end
+
+  return input_relevances
+end
+
+-- Recursively test for nan
+function testNan(el)
+  if torch.type(el) == 'table' then
+    for k,v in pairs(el) do
+      if testNan(v) then
+        return true
+      end
+      return false
+    end
+  else
+    local sum = el:sum()
+    return sum ~= sum -- True only for nan
+  end
+end
+
 -- Layer-wise relevance propagation on a network.
 -- To be called immediately after a forward pass has been done.
 function LRP(gmodule, R)
-  local relevancies = {}
+  local relevances = {}
   local agenda = {}
 
   -- Topological sort the graph nodes by dfs
@@ -9,10 +92,12 @@ function LRP(gmodule, R)
   local visited = {}
 
   function dfs(node)
-    if visited[node] ~= nil then return end
+    if visited[node] then
+      return
+    end
     visited[node] = true
 
-    for dependency, t in ipairs(node.data.reverseMap) do
+    for dependency, t in pairs(node.data.reverseMap) do
       -- Add everyone we depend on
       dfs(dependency)
     end
@@ -22,18 +107,41 @@ function LRP(gmodule, R)
   end
 
   -- Initialize the output relevance
-  dfs(gmodule.outnode)
-  relevancies[gmodule.outnode.data] = R
+  dfs(gmodule.innode) --outnode)
+  relevances[gmodule.outnode.data] = R
 
   -- We are now guaranteed that if we need X to compute Y,
   -- then X comes before Y in the toposort. So we can
-  -- iterate through the toposort and compute relevancies.
+  -- iterate through the toposort and compute relevances.
   for i=1,#toposorted do
     local node = toposorted[i]
-    local relevance = relevancies[node]
+    local relevance = relevances[node]
 
     -- Propagate input relevance
     local input_relevance = relPropagate(node, relevance)
+
+    if input_relevance == nil then
+      print('we failed.')
+      print('typename', torch.typename(node.module))
+      print('relevance', #relevance)
+      return nil
+    else
+      if testNan(input_relevance) then
+        print('we failed (there was a nan)')
+        print('typename', torch.typename(node.module))
+        print('node', node)
+        print('module', node.module)
+        print('rel', relevance)
+        if torch.type(input_relevance) == 'table' then
+          for k,v in pairs(input_relevance) do
+            print('inp_rel', k, v)
+          end
+        else
+          print('inp_rel', input_relevance)
+        end
+        return nil
+      end
+    end
 
     -- Accumulate.
     if #node.mapindex == 1 then
@@ -41,20 +149,36 @@ function LRP(gmodule, R)
       -- Special case for when there is only one
       -- input, because then the input_relevance is not a table
 
-      if relevancies[node.mapindex[0]] == nil then
-        relevancies[node.mapindex[0]] = input_relevance
+      -- In the case that we are a select node,
+      -- fill in just the part of the input table that we selected.
+      if node.selectindex then
+        if relevances[node.mapindex[1]] == nil then
+          relevances[node.mapindex[1]] = {}
+        end
+
+        if relevances[node.mapindex[1]][node.selectindex] == nil then
+          relevances[node.mapindex[1]][node.selectindex] = input_relevance
+        else
+          relevances[node.mapindex[1]][node.selectindex] = relevances[node.mapindex[1]] + input_relevance
+        end
+
+      -- Otherwise, in the normal case, this transfers one tensor to one tensor
       else
-        relevancies[node.mapindex[0]] = relevancies[node.mapindex[0]] + input_relevance
+        if relevances[node.mapindex[1]] == nil then
+          relevances[node.mapindex[1]] = input_relevance
+        else
+          relevances[node.mapindex[1]] = relevances[node.mapindex[1]] + input_relevance
+        end
       end
 
     else
 
       -- Otherwise use input_relevance as a table
       for j=1,#node.mapindex do
-        if relevancies[node.mapindex[j]] == nil then
-          relevancies[node.mapindex[j]] = input_relevance[j]
+        if relevances[node.mapindex[j]] == nil then
+          relevances[node.mapindex[j]] = input_relevance[j]
         else
-          relevancies[node.mapindex[j]] = relevancies[node.mapindex[j]] + input_relevance[j]
+          relevances[node.mapindex[j]] = relevances[node.mapindex[j]] + input_relevance[j]
         end
       end
 
@@ -63,7 +187,7 @@ function LRP(gmodule, R)
   end
 
   -- Return the input relevance
-  return relevancies[gmodule.innode.data]
+  return relevances[gmodule.innode.data]
 end
 
 -- Propagate relevance through a single
@@ -72,8 +196,15 @@ end
 -- Supports all the node types that appear in the
 -- encoder LSTM.
 function relPropagate(node_data, R)
-  local I = node_data.module.input
+  -- For nodes with no module, pass through.
+  if node_data.module == nil then
+    return R
+  end
+
+  local I = node_data.input
   local module = node_data.module
+
+  if #I == 1 then I = I[1] end
 
   -- For CMulTable, determine which one is the "gate",
   -- and propagate back only through the non-gate.
@@ -83,17 +214,22 @@ function relPropagate(node_data, R)
     -- We currently don't support MulTable for more than 2
     -- factors
     if #input_nodes > 2 then
+      print('Too many input nodes:', #input_nodes)
       return nil
     end
 
     local result_table = {}
     for i=1,#input_nodes do
       if torch.typename(input_nodes[i].module) == 'nn.Sigmoid' then
-        table.insert(result_table, 0)
+        -- Zeros
+        table.insert(result_table, R:clone():zero())
       else
-        table.insert(result_table, 1)
+        -- Pass-through
+        table.insert(result_table, R)
       end
     end
+
+    return result_table
 
   -- For CAddTable, use relPropagateAdd
   elseif torch.typename(module) == 'nn.CAddTable' then
@@ -107,13 +243,14 @@ function relPropagate(node_data, R)
   -- rearrange the relevance exactly backwards
   -- as the inputs were rearranged forward
   elseif torch.typename(module) == 'nn.Reshape' then
-    return torch.viewAs(R, I)
+    return R:clone():viewAs(I)
   elseif torch.typename(module) == 'nn.SplitTable' then
-    return torch.concatenate(R, module.dimension)
+    return torch.cat(R, module.dimension)
 
-  -- For LookupTable, pass through.
+  -- For LookupTable, the single input receives all
+  -- of the relevance
   elseif torch.typename(module) == 'nn.LookupTable' then
-    return R
+    return R:sum()
 
   -- Dropout; pass through
   elseif torch.typename(module) == 'nn.Dropout' then
@@ -140,16 +277,21 @@ end
 -- we want:
 local epsilon = 1e-6
 function relPropagateLinear(V, W, R)
-  local rs, vs = R:size(1), V:size(1)
+  local rs, vs = R:size(2), V:size(2)
 
   -- Get contributions
-  local contributions = (V:view(1, vs):expandAs(rs, vs) * W)
+  local contributions = torch.cmul(V:view(1, vs):expandAs(W), W)
   contributions = contributions + epsilon * torch.sign(contributions) / vs -- Add stabilizer
 
+  contributions[contributions:eq(0)] = epsilon / vs -- Make positive when zero
+
   -- Normalize
-  local normalizingFactor = contributions:mean(2):view(rs)
+  local normalizingFactor = contributions:sum(2):view(rs, 1)
   normalizingFactor = normalizingFactor + epsilon * torch.sign(normalizingFactor) -- Add stabilizer
-  contributions:cdiv(normalizingFactor:expandAs(rs, vs))
+
+  normalizingFactor[normalizingFactor:eq(0)] = epsilon -- Make positive when zero
+
+  contributions:cdiv(normalizingFactor:expandAs(contributions))
 
   -- Now each row is the contribution that each input gave to the
   -- output corresponding to that row index.
@@ -160,10 +302,13 @@ end
 
 function relPropagateAdd(T, R)
   -- Get total contributions
-  sumT = T[1]:clone():zero()
+  sumT = T[1]:clone()
   for i=1,#T do
-    sumT:cadd(T[i])
+    sumT:add(T[i])
   end
+
+  sumT:add(epsilon * torch.sign(sumT))
+  sumT[sumT:eq(0)] = epsilon -- Add stabilizer
 
   -- Normalize to sum to 1
   local normT = {}
@@ -174,7 +319,7 @@ function relPropagateAdd(T, R)
   -- Multiply to get proportional propagation
   local relevances = {}
   for i=1,#T do
-    table.insert(relevances, R * normT[i])
+    table.insert(relevances, torch.cmul(R, normT[i]))
   end
 
   return relevances

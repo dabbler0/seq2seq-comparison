@@ -10,23 +10,12 @@ require 's2sa.data'
 require 's2sa.models'
 require 's2sa.model_utils'
 
+require 'smooth-grad'
+require 'layerwise-relevance-propagation'
+
 require 'json'
 
 torch.manualSeed(0)
-
-function append_table(dst, src)
-  for i = 1, #src do
-    table.insert(dst, src[i])
-  end
-end
-
-function slice_table(t, index)
-  result = {}
-  for i=index,#t do
-    table.insert(result, t[i])
-  end
-  return result
-end
 
 function head_table(t, index)
   result = {}
@@ -95,12 +84,76 @@ function tokenize(line, inverse_alphabet)
   return tokens
 end
 
+function get_all_saliencies(
+    opt,
+    alphabet,
+    encoder_clones,
+    normalizer,
+    neuron,
+    sentence,
+    num_perturbations,
+    perturbation_size)
+
+  -- Find raw activations.
+
+  -- inputs
+  local one_hot_inputs = {}
+  for t=1,#sentence do
+    one_hot_inputs[t] = torch.Tensor(1, #alphabet):cuda()
+    one_hot_inputs[t][1][sentence[t]] = 1
+  end
+
+  -- rnn state
+  local rnn_state = {}
+  for i=1,2*opt.num_layers do
+    table.insert(rnn_state, torch.Tensor(1, opt.rnn_size):zero():cuda())
+  end
+
+  local activations = {}
+  for t=1,#sentence do
+    local inp = {one_hot_inputs[t]}
+    append_table(inp, rnn_state)
+    rnn_state = encoder_clones[t]:forward(inp)
+    print(#normalizer[1][1])
+    print(#normalizer[2][1])
+    print(rnn_state)
+    activations[t] = (rnn_state[#rnn_state][1][neuron] - normalizer[1][1][neuron]) / normalizer[2][1][neuron]
+  end
+
+  -- SmoothGrad saliency
+  local smooth_grad_saliency = smooth_grad(
+      opt,
+      alphabet,
+      encoder_clones,
+      normalizer,
+      neuron,
+      sentence,
+      num_perturbations,
+      perturbation_size)
+
+  -- LRP saliency
+  local layerwise_relevance_saliency = LRP_saliency(opt,
+      alphabet,
+      encoder_clones,
+      normalizer,
+      neuron,
+      sentence)
+
+  return {
+    ['SmoothGrad'] = smooth_grad_saliency,
+    ['LRP'] = layerwise_relevance_saliency,
+    ['activations'] = activations
+  }
+
+end
+
 function main()
   cmd = torch.CmdLine()
 
   cmd:option('-model_list', '', 'List of models with alphabets (alternating lines)')
   cmd:option('-max_len', 30, 'Maximum length')
   cmd:option('-num_perturbations', 3, 'Number of perturbations over which to average')
+  cmd:option('-perturbation_size', 11, 'Number of perturbations over which to average')
 
   local opt = cmd:parse(arg)
 
@@ -147,7 +200,6 @@ function main()
   while true do
     local network = io.read()
     local neuron = tonumber(io.read()) + 1
-    local perturbation_size = tonumber(io.read())
     local sentence = tokenize(io.read(), inverse_alphabets[network])
 
     local backward_tokens = {}
@@ -156,14 +208,18 @@ function main()
       table.insert(backward_tokens, alphabets[network][sentence[i]])
     end
 
-    local activations, saliencies =
-      get_all_saliencies(models[network], normalizers[network], opts[network], alphabets[network], neuron, sentence, opt.num_perturbations, perturbation_size)
+    local saliencies = get_all_saliencies(
+      opts[network],
+      alphabets[network],
+      models[network],
+      normalizers[network],
+      neuron,
+      sentence,
+      opt.num_perturbations,
+      opt.perturbation_size
+    )
 
-    print(json.encode({
-      ['activations'] = activations,
-      ['saliencies'] = saliencies,
-      ['tokens'] = backward_tokens
-    }))
+    print(json.encode(saliencies))
   end
 end
 
