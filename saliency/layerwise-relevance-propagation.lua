@@ -31,7 +31,7 @@ function LRP_saliency(
   -- Create one-hot encoding for each sentence
   local one_hots = {}
   for t=1,#sentence do
-    one_hots[t] = torch.Tensor(1, #alphabet):cuda()
+    one_hots[t] = torch.Tensor(1, #alphabet):zero():cuda()
     one_hots[t][1][sentence[t]] = 1 -- one-hot encoding
   end
 
@@ -41,6 +41,14 @@ function LRP_saliency(
     local encoder_input = {one_hots[t]}
     append_table(encoder_input, rnn_state)
     rnn_state = encoder_clones[t]:forward(encoder_input)
+    if testNan(rnn_state) then
+      print('An rnn_state was NaN, we\'re doomed.')
+      print('This occured at time', t)
+      for i=1,#rnn_state do
+        print(rnn_state[i])
+      end
+      return nil
+    end
   end
 
   -- Construct relevance with desired neuron
@@ -50,7 +58,7 @@ function LRP_saliency(
   end
 
   -- Inject relevance at desired neuron
-  relevances[#relevances][1][neuron] = 1 / normalizer[2][1][neuron] -- stdev for normalization
+  relevances[#relevances][1][neuron] = (rnn_state[#rnn_state][1][neuron] - normalizer[1][1][neuron]) / normalizer[2][1][neuron] --/ normalizer[2][1][neuron] -- stdev for normalization
 
   -- Propagate relevance
   local relevance_state = relevances
@@ -58,9 +66,7 @@ function LRP_saliency(
   for t=#sentence,1,-1 do
     relevance_state = LRP(encoder_clones[t], relevance_state)
     input_relevances[t] = relevance_state[1][1][sentence[t]]
-    print('I just put in the input relevance', relevance_state[1][1][sentence[t]])
     relevance_state = slice_table(relevance_state, 2)
-    print(input_relevances)
   end
 
   return input_relevances
@@ -129,8 +135,6 @@ function LRP(gmodule, R)
       if testNan(input_relevance) then
         print('we failed (there was a nan)')
         print('typename', torch.typename(node.module))
-        print('node', node)
-        print('module', node.module)
         print('rel', relevance)
         if torch.type(input_relevance) == 'table' then
           for k,v in pairs(input_relevance) do
@@ -237,7 +241,7 @@ function relPropagate(node_data, R)
 
   -- For Linear, use relPropagateLinear
   elseif torch.typename(module) == 'nn.Linear' then
-    return relPropagateLinear(I, module.weight, R)
+    return relPropagateLinear(I, module.weight, module.bias, R)
 
   -- Reshape and split table should
   -- rearrange the relevance exactly backwards
@@ -275,13 +279,19 @@ end
 --
 -- In other words, with a Linear layer with input V and weight W and output relevance R,
 -- we want:
-local epsilon = 1e-6
-function relPropagateLinear(V, W, R)
+local epsilon = 0.001
+function relPropagateLinear(V, W, B, R)
   local rs, vs = R:size(2), V:size(2)
 
   -- Get contributions
   local contributions = torch.cmul(V:view(1, vs):expandAs(W), W)
   contributions = contributions + epsilon * torch.sign(contributions) / vs -- Add stabilizer
+
+  -- Make conservative. Bias is going to be an (rs) vector,
+  -- which we distribute evenly among the contributions
+  if B ~= nil then
+    contributions = contributions + B:view(rs, 1):expandAs(W) / vs
+  end
 
   contributions[contributions:eq(0)] = epsilon / vs -- Make positive when zero
 
@@ -308,7 +318,7 @@ function relPropagateAdd(T, R)
   end
 
   sumT:add(epsilon * torch.sign(sumT))
-  sumT[sumT:eq(0)] = epsilon -- Add stabilizer
+  sumT[sumT:eq(0)] = epsilon -- Add stabilizer (make positive when zero)
 
   -- Normalize to sum to 1
   local normT = {}

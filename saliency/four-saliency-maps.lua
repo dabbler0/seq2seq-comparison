@@ -12,6 +12,8 @@ require 's2sa.model_utils'
 
 require 'smooth-grad'
 require 'layerwise-relevance-propagation'
+require 'lime'
+require 'erasure'
 
 require 'json'
 
@@ -43,6 +45,7 @@ function create_encoder_clones(checkpoint, max_len)
   end)
 
   encoder = encoder:cuda()
+  encoder:evaluate()
 
   return clone_many_times(encoder, max_len), opt
 end
@@ -79,7 +82,11 @@ function tokenize(line, inverse_alphabet)
       inverse_alphabet[entry] or inverse_alphabet['<unk>']
     )
   end
-  table.insert(tokens, inverse_alphabet['</s>'])
+
+  -- Don't insert the end-of-sentence token,
+  -- as we're trying to examine the activation right here
+
+  --table.insert(tokens, inverse_alphabet['</s>'])
 
   return tokens
 end
@@ -99,7 +106,7 @@ function get_all_saliencies(
   -- inputs
   local one_hot_inputs = {}
   for t=1,#sentence do
-    one_hot_inputs[t] = torch.Tensor(1, #alphabet):cuda()
+    one_hot_inputs[t] = torch.Tensor(1, #alphabet):zero():cuda()
     one_hot_inputs[t][1][sentence[t]] = 1
   end
 
@@ -114,9 +121,9 @@ function get_all_saliencies(
     local inp = {one_hot_inputs[t]}
     append_table(inp, rnn_state)
     rnn_state = encoder_clones[t]:forward(inp)
-    print(#normalizer[1][1])
-    print(#normalizer[2][1])
-    print(rnn_state)
+    print('mean', normalizer[1][1][neuron])
+    print('stdev', normalizer[2][1][neuron])
+    print('activation', rnn_state[#rnn_state][1][neuron])
     activations[t] = (rnn_state[#rnn_state][1][neuron] - normalizer[1][1][neuron]) / normalizer[2][1][neuron]
   end
 
@@ -139,10 +146,30 @@ function get_all_saliencies(
       neuron,
       sentence)
 
+  local lime_saliency = lime(opt,
+      alphabet,
+      encoder_clones,
+      normalizer,
+      neuron,
+      sentence,
+      num_perturbations * 10, -- Lime requires many more perturbations than SmoothGrad
+      perturbation_size
+  )
+
+  local erasure_saliency = erasure(opt,
+      alphabet,
+      encoder_clones,
+      normalizer,
+      neuron,
+      sentence
+  )
+
   return {
-    ['SmoothGrad'] = smooth_grad_saliency,
-    ['LRP'] = layerwise_relevance_saliency,
-    ['activations'] = activations
+    ['sgrad'] = smooth_grad_saliency,
+    ['lrp'] = layerwise_relevance_saliency,
+    ['lime'] = lime_saliency,
+    ['erasure'] = erasure_saliency,
+    ['activat'] = activations
   }
 
 end
@@ -219,7 +246,15 @@ function main()
       opt.perturbation_size
     )
 
-    print(json.encode(saliencies))
+    for k,p in pairs(saliencies) do
+      str = k
+      for i=1,#p do
+        str = str .. '\t' .. string.format('%.3f', p[i])
+      end
+      print(str)
+    end
+
+    --print(json.encode(saliencies))
   end
 end
 
