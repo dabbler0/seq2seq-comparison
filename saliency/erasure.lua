@@ -1,3 +1,6 @@
+-- Importance measured by word erasure:
+-- implemented from https://arxiv.org/pdf/1612.08220.pdf
+
 function append_table(dst, src)
   for i = 1, #src do
     table.insert(dst, src[i])
@@ -92,7 +95,7 @@ function erasure(
   -- Get affinity for each token in the sentence
   local affinity = {}
   for t=1,length do
-    table.insert(affinity, reference - results[t])
+    table.insert(affinity, (reference - results[t]) / reference)
   end
 
   return affinity

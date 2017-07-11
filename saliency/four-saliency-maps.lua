@@ -1,3 +1,9 @@
+-- Compute saliencies by four methods:
+--  - Word erasure
+--  - Layer-wise Relevance Propagation
+--  - SmoothGrad
+--  - LIME
+
 require 'nn'
 require 'nngraph'
 require 'hdf5'

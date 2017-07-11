@@ -1,3 +1,6 @@
+-- Importance measured by local linear approximation
+-- a simplified version of LIME: https://arxiv.org/pdf/1602.04938v1.pdf
+
 function append_table(dst, src)
   for i = 1, #src do
     table.insert(dst, src[i])

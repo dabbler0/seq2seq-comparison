@@ -1,3 +1,9 @@
+-- Importance measured by LRP as described in this paper:
+-- https://arxiv.org/pdf/1706.07206.pdf
+--
+-- Doesn't seem to work; might be flaw in the model when used with Uni-LSTMs,
+-- might be flaw in the implementation
+
 function append_table(dest, inp)
   for i=1,#inp do
     table.insert(dest, inp[i])

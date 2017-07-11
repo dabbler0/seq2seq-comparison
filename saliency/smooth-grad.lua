@@ -1,3 +1,6 @@
+-- Importance as measured by gradients at slightly permuted positions, as described here:
+-- https://arxiv.org/pdf/1706.03825.pdf
+
 function append_table(dst, src)
   for i = 1, #src do
     table.insert(dst, src[i])
