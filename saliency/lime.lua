@@ -20,7 +20,6 @@ function lime(
     alphabet,
     encoder_clones,
     normalizer,
-    neuron,
     sentence,
     num_perturbations,
     perturbation_size)
@@ -71,15 +70,13 @@ function lime(
     local perturbed_encodings = {}
     for t=1,length do
       local encoder_input = {softmax[t]:forward(current_source[t])}
-      table.insert(perturbed_encodings, encoder_input[1])
+      table.insert(perturbed_encodings, encoder_input[1]:clone())
       append_table(encoder_input, rnn_state)
       rnn_state = encoder_clones[t]:forward(encoder_input)
     end
 
     -- Compute normalized loss
-    local loss = (
-      rnn_state[#rnn_state][1][neuron] - mean[1][neuron]
-    ) / stdev[1][neuron]
+    local loss = (rnn_state[#rnn_state][1] - mean[1]):cdiv(stdev[1])
 
     return perturbed_encodings, loss --grad_params
   end
@@ -97,13 +94,13 @@ function lime(
 
     -- Start at a given sentence
     for t=1,length do
-      current_source[t][1][sentence[t]] = perturbation_size -- perturbation_size
+      current_source[t][1][sentence[t]] = perturbation_size  * 2 * torch.uniform() -- perturbation_size
       -- e^x will be just a little bit more than all the other probabilities combined
     end
 
     -- Create the data point for LIME to regress from
     local perturbed_encodings, loss = run_forward(all_params, length)
-    local input_data = torch.Tensor(length)
+    local input_data = torch.Tensor(length):cuda()
     for t=1,length do
       input_data[t] = perturbed_encodings[t][1][sentence[t]]
     end
@@ -113,24 +110,25 @@ function lime(
   end
 
   -- Put data points into the model for regression
-  local input_matrix = torch.Tensor(num_perturbations, length)
-  local output_matrix = torch.Tensor(num_perturbations)
+  local input_matrix = torch.Tensor(num_perturbations, length):cuda()
+  local output_matrix = torch.Tensor(num_perturbations, opt.rnn_size):cuda()
   for t=1,num_perturbations do
-    input_matrix[t] = lime_data_inputs[t]
-    output_matrix[t] = lime_data_outputs[t]
+    input_matrix[t] = lime_data_inputs[t] -- nn.utils.recursiveType(lime_data_inputs[t], 'torch.DoubleTensor')
+    output_matrix[t] = lime_data_outputs[t] -- nn.utils.recursiveType(lime_data_outputs[t], 'torch.DoubleTensor')
   end
 
   -- Create the local linear model
   -- Projection should be length x 1
-  local projection = torch.gels(output_matrix, input_matrix)
+  local projection = torch.inverse(input_matrix:t() * input_matrix) * input_matrix:t() * output_matrix
+  --local projection = torch.gels(output_matrix, input_matrix)
 
   print('regressed projection.')
-  print(projection)
+  print(#projection)
 
   -- Get affinity for each token in the sentence
   local affinity = {}
   for t=1,length do
-    table.insert(affinity, projection[t][1])
+    table.insert(affinity, projection[t])
   end
 
   return affinity

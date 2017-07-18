@@ -22,7 +22,7 @@ function main()
 
   -- Encode each line in the input sample file
   for line in file:lines() do
-    encoding = beam.encode(line)
+    local encoding, last_cell = beam.encode(line)
     if encoding ~= nil then
       table.insert(encodings, nn.utils.recursiveType(encoding[1], 'torch.DoubleTensor')) -- encoding[1] should be size_l x rnn_size
       total_token_length = total_token_length + encoding:size()[2]

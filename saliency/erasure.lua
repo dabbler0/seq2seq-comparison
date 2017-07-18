@@ -20,7 +20,6 @@ function erasure(
     alphabet,
     encoder_clones,
     normalizer,
-    neuron,
     sentence)
 
   local alphabet_size = #alphabet
@@ -46,7 +45,6 @@ function erasure(
   for i=1,2*opt.num_layers do
     table.insert(
       first_hidden,
-      --all_params:narrow(1, 1 + length*alphabet_size + opt.rnn_size*(i-1), opt.rnn_size):view(1, opt.rnn_size)
       torch.Tensor(1, opt.rnn_size):zero():cuda()
     )
   end
@@ -55,22 +53,18 @@ function erasure(
   function run_forward(all_params, length, skip)
     -- Forward pass
     local rnn_state = first_hidden
-    local perturbed_encodings = {}
     for t=1,length-1 do
       -- Skip the given token
       if t >= skip then t = t + 1 end
 
       local encoder_input = {current_source[t]}
       append_table(encoder_input, rnn_state)
-      rnn_state = encoder_clones[t]:forward(encoder_input)
+      rnn_state = encoder_clones[1]:forward(encoder_input)
     end
 
-    -- Compute normalized loss
-    local loss = (
-      rnn_state[#rnn_state][1][neuron] - mean[1][neuron]
-    ) / stdev[1][neuron]
-
-    return loss --grad_params
+    -- Return entire output vector
+    -- as a 1d tensor
+    return (rnn_state[#rnn_state][1] - mean[1]):cdiv(stdev[1])
   end
 
   local lime_data_inputs = {}
@@ -87,7 +81,7 @@ function erasure(
   local length = #sentence
   local results = {}
   for t=1,length+1 do
-    results[t] = run_forward(all_params, length, t)
+    results[t] = run_forward(all_params, length, t):clone()
   end
 
   local reference = results[#results]
@@ -95,7 +89,7 @@ function erasure(
   -- Get affinity for each token in the sentence
   local affinity = {}
   for t=1,length do
-    table.insert(affinity, (reference - results[t]) / reference)
+    table.insert(affinity, (results[t] - reference):cdiv(reference))
   end
 
   return affinity

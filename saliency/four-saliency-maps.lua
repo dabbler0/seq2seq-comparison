@@ -21,6 +21,9 @@ require 'layerwise-relevance-propagation'
 require 'lime'
 require 'erasure'
 
+ProFi = require 'ProFi'
+ProFi:start()
+
 require 'json'
 
 torch.manualSeed(0)
@@ -102,7 +105,6 @@ function get_all_saliencies(
     alphabet,
     encoder_clones,
     normalizer,
-    neuron,
     sentence,
     num_perturbations,
     perturbation_size)
@@ -127,46 +129,45 @@ function get_all_saliencies(
     local inp = {one_hot_inputs[t]}
     append_table(inp, rnn_state)
     rnn_state = encoder_clones[t]:forward(inp)
-    print('mean', normalizer[1][1][neuron])
-    print('stdev', normalizer[2][1][neuron])
-    print('activation', rnn_state[#rnn_state][1][neuron])
-    activations[t] = (rnn_state[#rnn_state][1][neuron] - normalizer[1][1][neuron]) / normalizer[2][1][neuron]
+    activations[t] = (rnn_state[#rnn_state][1] - normalizer[1][1]):cdiv(normalizer[2][1])
   end
 
   -- SmoothGrad saliency
+  print('Computing SmoothGrad...')
   local smooth_grad_saliency = smooth_grad(
       opt,
       alphabet,
       encoder_clones,
       normalizer,
-      neuron,
       sentence,
       num_perturbations,
-      perturbation_size)
+      perturbation_size
+  )
 
   -- LRP saliency
+  print('Computing LRP...')
   local layerwise_relevance_saliency = LRP_saliency(opt,
       alphabet,
       encoder_clones,
       normalizer,
-      neuron,
-      sentence)
+      sentence
+  )
 
+  print('Computing LIME...')
   local lime_saliency = lime(opt,
       alphabet,
       encoder_clones,
       normalizer,
-      neuron,
       sentence,
-      num_perturbations * 10, -- Lime requires many more perturbations than SmoothGrad
+      num_perturbations * 40, -- Lime requires many more perturbations than SmoothGrad
       perturbation_size
   )
 
+  print('Computing erasure...')
   local erasure_saliency = erasure(opt,
       alphabet,
       encoder_clones,
       normalizer,
-      neuron,
       sentence
   )
 
@@ -232,7 +233,7 @@ function main()
 
   while true do
     local network = io.read()
-    local neuron = tonumber(io.read()) + 1
+    if network == 'end' then return end
     local sentence = tokenize(io.read(), inverse_alphabets[network])
 
     local backward_tokens = {}
@@ -246,18 +247,26 @@ function main()
       alphabets[network],
       models[network],
       normalizers[network],
-      neuron,
       sentence,
       opt.num_perturbations,
       opt.perturbation_size
     )
 
+    local str = 'activat'
+    local p = saliencies['activat']
+    for i=1,#p do
+      str = str .. '\t' .. string.format('%.3f', p[i][433])
+    end
+    print(str)
+
     for k,p in pairs(saliencies) do
-      str = k
-      for i=1,#p do
-        str = str .. '\t' .. string.format('%.3f', p[i])
+      if k ~= 'activat' then
+        str = k
+        for i=1,#p do
+          str = str .. '\t' .. string.format('%.3f', p[i][433])
+        end
+        print(str)
       end
-      print(str)
     end
 
     --print(json.encode(saliencies))
@@ -265,3 +274,6 @@ function main()
 end
 
 main()
+
+ProFi:stop()
+ProFi:writeReport('profile.txt')

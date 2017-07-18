@@ -48,30 +48,32 @@ function train_nonlinear_predictor(A, hiddens, B, batch_size, epochs)
 
   -- Construct simple one-layer neural network
   local network = nn.Sequential()
-  network:add(nn.Linear(A:size(1), hiddens))
+  network:add(nn.Linear(A:size(2), hiddens))
   network:add(nn.Tanh())
-  network:add(nn.Linear(hiddens, B:size(1)))
+  network:add(nn.Linear(hiddens, B:size(2)))
 
   -- MSE criterion
   local criterion = nn.MSECriterion()
 
   -- Get parameters
-  local params, grad_params = network.getParameters()
+  local params, grad_params = network:getParameters()
 
   -- Do several Adam optimization passes
   local full_epochs = 0
   local order = torch.randperm(A:size(1))
   local index = 1
+  print('Beginning epoch', 1)
   function optim_function(params)
     network:zeroGradParameters()
 
     -- Start new epoch if necessary
-    if index + batch_size > #order then
+    if index + batch_size > order:size(1) then
       -- Put items in a new random order
       -- and start indexing over.
       order = torch.randperm(A:size(1))
       index = 1
       full_epochs = full_epochs + 1
+      print('Beginning epoch', full_epochs)
     end
 
     -- Assemble the current minibatch
@@ -90,23 +92,25 @@ function train_nonlinear_predictor(A, hiddens, B, batch_size, epochs)
 
     -- (backward)
     local output_grad = criterion:backward(prediction, batch_output)
-    local input_grad = network:backward(batch_input, loss_grad)
+    local input_grad = network:backward(batch_input, output_grad)
+
+    print(loss)
 
     -- Return loss
     return loss, grad_params
   end
 
   local optim_state = {
-    learning_rate = 0.05
+    learning_rate = 0.002
   }
   while full_epochs < epochs do
-    optim.adam(optim_function, optim_state)
+    optim.adam(optim_function, params, optim_state)
   end
 
   -- Do one forward pass to get error
   local total_prediction = network:forward(testA)
 
-  return (total_prediction - testB):pow(2):mean(1):sqrt()
+  return (total_prediction - testB):pow(2):mean(1): -- sqrt() -- oops, this is not supposed to be sqrt()ed
 end
 
 function covariance_matrix(A, B) -- samples x sizeA, samples x sizeB
@@ -188,7 +192,7 @@ function main()
           encoding_A,
           500, -- Usually equal to the number of dimensions
           encoding_B,
-          50,
+          500, -- batch_size
           13
         )
 

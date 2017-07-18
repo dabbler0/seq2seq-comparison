@@ -810,13 +810,11 @@ end
 -- This will be used for computing statistics like correlation between components of the encoding
 -- over the space of inputs.
 function encode(line, layer)
-  sent_id = sent_id + 1
-
   -- Get tokens from string
   local cleaned_tokens, source_features_str = extract_features(line)
   local cleaned_line = table.concat(cleaned_tokens, ' ')
 
-  print('SENT ' .. sent_id .. ': ' ..line)
+  print('SENT: ' ..line)
 
   -- Create the source vectors
   local source, source_str
@@ -825,9 +823,6 @@ function encode(line, layer)
     source, source_str = sent2wordidx(cleaned_line, word2idx_src, model_opt.start_symbol)
   else
     source, source_str = sent2charidx(cleaned_line, char2idx, model_opt.max_word_l, model_opt.start_symbol)
-  end
-  if gold then
-    target, target_str = sent2wordidx(gold[sent_id], word2idx_targ, 1)
   end
 
   -- Use the correct gpu if specified
@@ -838,7 +833,7 @@ function encode(line, layer)
   -- Cap source length
   local source_l
   if source:size(1) > opt.max_sent_l then
-    return nil
+    return nil, nil
   else
     source_l = source:size(1)
   end
@@ -876,7 +871,70 @@ function encode(line, layer)
     context[{{},t}]:copy(out[layer])
   end
 
-  return context
+  return context, rnn_state_enc
+end
+
+function decode(input, output)
+  -- Get true encoder context
+  local context, last_cell = encode(input, nil)
+
+  if context == nil then return nil end
+
+  context = context:cuda()
+  for i=1,#last_cell do
+    last_cell[i] = last_cell[i]:cuda()
+  end
+
+  -- Get tokens from string
+  local cleaned_tokens, source_features_str = extract_features(output)
+  local cleaned_line = table.concat(cleaned_tokens, ' ')
+
+  -- Create the target
+  local target, target_str = sent2wordidx(cleaned_line, word2idx_targ, 1)
+
+  -- Use the correct gpu if specified
+  if opt.gpuid >= 0 and opt.gpuid2 >= 0 then
+    cutorch.setDevice(opt.gpuid)
+  end
+
+  local target_l = target:size(1)
+
+  local target_input = target:view(target_l, 1):cuda()
+
+  print('Last cell as', #last_cell)
+
+  -- Use the last cell of the encoder as the first
+  -- cell of the decoder
+  local rnn_state = last_cell
+  if model_opt.input_feed == 1 then
+    table.insert(rnn_state, 1, last_cell[1]:clone():zero()) -- Put another zeroed hidden vector at the start
+  end
+
+  local concatenated_decoder_context = torch.Tensor(
+    target_l,
+    model_opt.rnn_size * #rnn_state
+  )
+
+  for t = 1, target_l do
+    -- Attention input
+    local decoder_input = {target_input[t], context, table.unpack(rnn_state)}
+
+    local out = model[2]:forward(decoder_input)
+
+    rnn_state = {}
+    if model_opt.input_feed == 1 then
+      table.insert(rnn_state, out[#out])
+    end
+    for j = 1, #out-1 do
+      table.insert(rnn_state, out[j])
+    end
+
+    for i = 1, #out do
+      concatenated_decoder_context[t]:narrow(1, (i - 1) * model_opt.rnn_size + 1, model_opt.rnn_size):copy(out[i])
+    end
+  end
+
+  return concatenated_decoder_context
 end
 
 function getOptions()
@@ -887,5 +945,6 @@ return {
   init = init,
   search = search,
   encode = encode,
+  decode = decode,
   getOptions = getOptions
 }

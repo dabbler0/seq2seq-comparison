@@ -20,7 +20,6 @@ function smooth_grad(
     alphabet,
     encoder_clones,
     normalizer,
-    neuron,
     sentence,
     num_perturbations,
     perturbation_size)
@@ -38,11 +37,13 @@ function smooth_grad(
   local mean, stdev = normalizer[1], normalizer[2]
 
   local all_params = torch.Tensor(length * alphabet_size):zero():cuda() --uniform()
-  local grad_params = torch.Tensor(length * alphabet_size):zero():cuda()
-  local cumulative_gradients = torch.Tensor(length * alphabet_size):zero():cuda()
+  local affinities = torch.Tensor(length, opt.rnn_size):zero():cuda()
+  local cumulative_affinities = torch.Tensor(length, opt.rnn_size):zero():cuda()
 
   local current_source = {}
+  local current_source_view = {}
 
+  -- Source one-hots
   for t=1,length do
     table.insert(
       current_source,
@@ -50,14 +51,12 @@ function smooth_grad(
     )
   end
 
-  local source_gradients = {}
-
+  -- Expand source one-hots to batch size 500; one for each output neuron
   for t=1,length do
-    table.insert(
-      source_gradients,
-      cumulative_gradients:narrow(1, (t-1)*alphabet_size + 1, alphabet_size):view(1, alphabet_size)
-    )
+    current_source_view[t] = current_source[t]:expand(opt.rnn_size, alphabet_size)
   end
+
+  local source_gradients = {}
 
   -- Construct beginning hidden state
   local first_hidden = {}
@@ -65,15 +64,13 @@ function smooth_grad(
     table.insert(
       first_hidden,
       --all_params:narrow(1, 1 + length*alphabet_size + opt.rnn_size*(i-1), opt.rnn_size):view(1, opt.rnn_size)
-      torch.Tensor(1, opt.rnn_size):zero():cuda()
+      torch.Tensor(1, opt.rnn_size):zero():cuda():expand(opt.rnn_size, opt.rnn_size)
     )
   end
 
   -- Gradient-retrieval function
-  function get_gradient(all_params, length, perfect)
-    if perfect == nil then perfect = false end
-
-    grad_params:zero()
+  function get_gradient(all_params, length)
+    affinities:zero()
 
     local softmax = {}
     for i=1,length do
@@ -89,35 +86,32 @@ function smooth_grad(
     local rnn_state = first_hidden
     local encoder_inputs = {}
     for t=1,length do
-      local encoder_input = nil
-      if perfect then
-        encoder_input = {current_source[t]}
-      else
-        encoder_input = {softmax[t]:forward(current_source[t])}
-      end
+      local encoder_input = {softmax[t]:forward(current_source_view[t])}
       append_table(encoder_input, rnn_state)
       encoder_inputs[t] = encoder_input
       rnn_state = encoder_clones[t]:forward(encoder_input)
     end
 
     -- Compute normalized loss
-    local loss = (
-      rnn_state[#rnn_state][1][neuron] - mean[1][neuron]
-    ) / stdev[1][neuron]
+    local loss = (rnn_state[#rnn_state][1] - mean[1]):cdiv(stdev[1])
 
     -- Backward pass
 
     -- Construct final gradient
     local last_hidden = {}
-    for i=1,2*opt.num_layers do
+    for i=1,2*opt.num_layers-1 do
       table.insert(
         last_hidden,
-        torch.zeros(1, opt.rnn_size):cuda()
+        torch.zeros(opt.rnn_size, opt.rnn_size):cuda()
       )
     end
 
-    -- Trying to maximize exactly this neuron
-    last_hidden[#last_hidden][1][neuron] = 1 / stdev[1][neuron]
+    -- Diagonal matrix of normalizers. This represents 500 batches, one for each dimensions,
+    -- where dimension x is backpropagating relevance for the xth output
+    table.insert(
+      last_hidden,
+      torch.diag(torch.cinv(stdev[1])):cuda()
+    )
 
     -- Initialize.
     local rnn_state_gradients = {}
@@ -126,15 +120,10 @@ function smooth_grad(
     for t=length,1,-1 do
       local encoder_input_gradient = encoder_clones[t]:backward(encoder_inputs[t], rnn_state_gradients[t])
       -- Get source gradients and copy into gradient array
-      if perfect then
-        grad_params:narrow(1, 1 + (t-1)*alphabet_size, alphabet_size):copy(
-          encoder_input_gradient[1]
-        )
-      else
-        grad_params:narrow(1, 1 + (t-1)*alphabet_size, alphabet_size):copy(
-          softmax[t]:backward(current_source[t], encoder_input_gradient[1])
-        )
-      end
+      local final_gradient = softmax[t]:backward(current_source_view[t], encoder_input_gradient[1])
+
+      affinities[t]:copy(final_gradient[{{}, sentence[t]}])
+
       -- Get RNN state gradients
       rnn_state_gradients[t-1] = slice_table(encoder_input_gradient, 2)
     end
@@ -145,11 +134,8 @@ function smooth_grad(
   local saliency_maps = {}
 
   all_params:zero()
-  grad_params:zero()
-  cumulative_gradients:zero()
-
-  local affinities = {}
-  local activations = {}
+  affinities:zero()
+  cumulative_affinities:zero()
 
   -- Do several perturbations
   local length = #sentence
@@ -166,18 +152,18 @@ function smooth_grad(
     end
 
     get_gradient(all_params, length)
-    cumulative_gradients:add(grad_params)
+    cumulative_affinities:add(affinities)
   end
 
   -- Average
-  cumulative_gradients:div(num_perturbations)
+  cumulative_affinities:div(num_perturbations)
 
   -- Get affinity for each token in the sentence
-  local affinity = {}
+  local result_affinity = {}
   for t=1,length do
-    table.insert(affinity, source_gradients[t][1][sentence[t]])
+    table.insert(result_affinity, cumulative_affinities[t])
   end
 
-  return affinity
+  return result_affinity
 end
 
