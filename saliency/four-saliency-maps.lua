@@ -18,6 +18,7 @@ require 's2sa.model_utils'
 
 require 'smooth-grad'
 require 'layerwise-relevance-propagation'
+require 'sensitivity-analysis'
 require 'lime'
 require 'erasure'
 
@@ -133,6 +134,14 @@ function get_all_saliencies(
   end
 
   -- SmoothGrad saliency
+  print('Computing SA')
+  local sa = sensitivity_analysis(
+      opt,
+      alphabet,
+      encoder_clones,
+      normalizer,
+      sentence
+  )
   print('Computing SmoothGrad...')
   local smooth_grad_saliency = smooth_grad(
       opt,
@@ -146,7 +155,8 @@ function get_all_saliencies(
 
   -- LRP saliency
   print('Computing LRP...')
-  local layerwise_relevance_saliency = LRP_saliency(opt,
+  local layerwise_relevance_saliency = LRP_saliency(
+      opt,
       alphabet,
       encoder_clones,
       normalizer,
@@ -154,7 +164,8 @@ function get_all_saliencies(
   )
 
   print('Computing LIME...')
-  local lime_saliency = lime(opt,
+  local lime_saliency = lime(
+      opt,
       alphabet,
       encoder_clones,
       normalizer,
@@ -164,7 +175,8 @@ function get_all_saliencies(
   )
 
   print('Computing erasure...')
-  local erasure_saliency = erasure(opt,
+  local erasure_saliency = erasure(
+      opt,
       alphabet,
       encoder_clones,
       normalizer,
@@ -176,6 +188,7 @@ function get_all_saliencies(
     ['lrp'] = layerwise_relevance_saliency,
     ['lime'] = lime_saliency,
     ['erasure'] = erasure_saliency,
+    ['sa'] = sa,
     ['activat'] = activations
   }
 

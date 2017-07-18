@@ -99,14 +99,7 @@ function LRP(gmodule, R)
     local relevance = relevances[node]
 
     -- Propagate input relevance
-    local clock = os.clock()
     local input_relevance = relevance_propagate(node, relevance)
-    local final = os.clock() - clock
-    if node.module then
-      print('Elapsed propagation time total:', final, torch.typename(node.module))
-    else
-      print('Elapsed propagation time total:', final, '(nil)')
-    end
 
     if #node.mapindex == 1 then
       -- Case 1: Select node
@@ -135,7 +128,7 @@ function LRP(gmodule, R)
 
     else
 
-      -- Table uses information from several input nodes
+      -- Case 3: Table uses information from several input nodes
       for j=1,#node.mapindex do
         if relevances[node.mapindex[j]] == nil then
           relevances[node.mapindex[j]] = input_relevance[j]
@@ -214,7 +207,6 @@ end
 -- Morrored as closely as possible from Arras's LRP_for_lstm
 local eps = 0.001
 function lrp_linear(hin, module, relevance)
-  local iclock = os.clock()
   local w = module.weight:t():clone():contiguous()
   local b = module.bias
   local bias_factor = 1
@@ -254,33 +246,25 @@ function lrp_linear(hin, module, relevance)
 end
 
 function lrp_add(inputs, R)
-  local iclock = os.clock()
-
   sum_inputs = inputs[1]:clone()
   for i=2,#inputs do
     sum_inputs:add(inputs[i])
   end
 
-  print('Summed', os.clock() - iclock)
-
   sign_sum = torch.sign(sum_inputs)
   sign_sum:add(torch.eq(sum_inputs, 0):cuda())
-  print('Signed', os.clock() - iclock)
 
   sum_inputs:add(eps * sign_sum)
-  print('Stabilized', os.clock() - iclock)
 
   local factors = {}
   for i=1,#inputs do
     table.insert(factors, torch.cdiv(inputs[i], sum_inputs))
   end
-  print('Sliced', os.clock() - iclock)
 
   local relevances = {}
   for i=1,#inputs do
     table.insert(relevances, torch.cmul(R, factors[i]))
   end
-  print('Scaled', os.clock() - iclock)
 
   return relevances
 end

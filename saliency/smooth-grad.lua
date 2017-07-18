@@ -24,9 +24,6 @@ function smooth_grad(
     num_perturbations,
     perturbation_size)
 
-
-  print(normalizer)
-
   -- Default arguments
   if num_perturbations == nil then num_perturbations = 3 end
   if perturbation_size == nil then perturbation_size = 11 end
