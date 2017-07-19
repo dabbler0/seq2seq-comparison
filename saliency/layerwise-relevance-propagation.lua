@@ -269,17 +269,7 @@ function nn.CMulTable:lrp(input, relevance, true_index)
   return self.Rin
 end
 
-local global_shared_numers = {}
-
-function create_global_shared_numer(D, M)
-  local key = D .. 'x' .. M
-  if global_shared_numers[key] == nil then
-    global_shared_numers[key] = torch.CudaTensor()
-  end
-  return global_shared_numers[key]
-end
-
-function nn.Linear:lrp(input, relevance)
+function nn.Linear:lrp(input, relevance, use_bias)
   local start = os.clock()
 
   -- Allocate memory we need for LRP here.
@@ -292,17 +282,14 @@ function nn.Linear:lrp(input, relevance)
 
     --self.numer = create_global_shared_numer(self.D, self.M) -- Need to share this particular memory with other Linear instances
     self.hin = torch.CudaTensor()
-    if self.bias then
-      self.norm_bias = self.bias:clone():div(self.D)
-    end
 
     self.denom = torch.CudaTensor()
+
     self.denom_sign = torch.CudaTensor()
     self.denom_sign_clone = torch.CudaTensor()
 
     self.Rin = torch.CudaTensor()
   end
-
 
   local b = relevance:size(1)
 
@@ -320,10 +307,18 @@ function nn.Linear:lrp(input, relevance)
   -- Add epsilon to the denominator and invert
   self.denom:add(self.denom_sign:mul(eps)):cinv():cmul(relevance)
 
+  -- Compute main 'messages'
   self.Rin:resizeAs(input):zero()
   self.Rin:addmm(0, self.Rin, 1, self.denom, self.weight)
-
   self.Rin:cmul(input)
+
+  -- Add numerator stabilizer
+  self.Rin:add(self.denom_sign:cmul(self.denom):sum(2):div(self.D):view(b, 1):expandAs(self.Rin))
+
+  -- Add bias term if present and desired
+  if use_bias and self.bias then
+    self.Rin:add(self.denom:cmul(self.bias):sum(2):div(self.D):view(b, 1):expandAs(self.Rin))
+  end
 
   -- Return
   return self.Rin

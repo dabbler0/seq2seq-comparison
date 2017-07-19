@@ -122,9 +122,6 @@ function lime(
   local projection = torch.inverse(input_matrix:t() * input_matrix) * input_matrix:t() * output_matrix
   --local projection = torch.gels(output_matrix, input_matrix)
 
-  print('regressed projection.')
-  print(#projection)
-
   -- Get affinity for each token in the sentence
   local affinity = {}
   for t=1,length do
