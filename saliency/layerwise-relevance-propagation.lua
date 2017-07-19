@@ -61,7 +61,7 @@ function LRP_saliency(
   local input_relevances = {}
   for t=#sentence,1,-1 do
     relevance_state = LRP(encoder_clones[t], relevance_state)
-    input_relevances[t] = relevance_state[1]:view(opt.rnn_size) -- batch_size x alphabet_size, summed -> batch_size
+    input_relevances[t] = relevance_state[1]:view(opt.rnn_size):clone() -- batch_size x alphabet_size, summed -> batch_size
     relevance_state = slice_table(relevance_state, 2)
   end
 
@@ -99,7 +99,11 @@ function LRP(gmodule, R)
     local relevance = relevances[node]
 
     -- Propagate input relevance
+    local start = os.clock()
     local input_relevance = relevance_propagate(node, relevance)
+    if os.clock() - start > 0.1 then
+      print('Slow:', torch.typename(node.module), os.clock() - start)
+    end
 
     if #node.mapindex == 1 then
       -- Case 1: Select node
@@ -112,7 +116,7 @@ function LRP(gmodule, R)
         if relevances[node.mapindex[1]][node.selectindex] == nil then
           relevances[node.mapindex[1]][node.selectindex] = input_relevance
         else
-          relevances[node.mapindex[1]][node.selectindex] = relevances[node.mapindex[1]][node.selectindex] + input_relevance
+          relevances[node.mapindex[1]][node.selectindex]:add(input_relevance)
         end
 
       -- Case 2: Not select node
@@ -121,7 +125,7 @@ function LRP(gmodule, R)
         if relevances[node.mapindex[1]] == nil then
           relevances[node.mapindex[1]] = input_relevance
         else
-          relevances[node.mapindex[1]] = relevances[node.mapindex[1]] + input_relevance
+          relevances[node.mapindex[1]]:add(input_relevance)
         end
 
       end
@@ -133,7 +137,7 @@ function LRP(gmodule, R)
         if relevances[node.mapindex[j]] == nil then
           relevances[node.mapindex[j]] = input_relevance[j]
         else
-          relevances[node.mapindex[j]] = relevances[node.mapindex[j]] + input_relevance[j]
+          relevances[node.mapindex[j]]:add(input_relevance[j])
         end
       end
 
@@ -157,23 +161,21 @@ function relevance_propagate(node, R)
 
   -- MulTable: pass-through on non-gate inputs
   if torch.typename(module) == 'nn.CMulTable' then
+    -- Identify the non-gate input node
     local input_nodes = node.mapindex
-
-    local result_table = {}
-    -- Identify the gates as the Sigmoid nodes
+    local true_index = nil
     for i=1,#input_nodes do
-      if torch.typename(input_nodes[i].module) == 'nn.Sigmoid' then
-        table.insert(result_table, R:clone():zero())
-      else
-        table.insert(result_table, R)
+      if torch.typename(input_nodes[i].module) ~= 'nn.Sigmoid' then
+        true_index = i
+        break
       end
     end
 
-    return result_table
+    return module:lrp(I, R, true_index)
   end
 
   if torch.typename(module) == 'nn.CAddTable' then
-    return lrp_add(I, R)
+    return module:lrp(I, R)
   end
 
   if torch.typename(module) == 'nn.Linear' then
@@ -183,15 +185,15 @@ function relevance_propagate(node, R)
       return R:sum(2)
     end
 
-    return lrp_linear(I, module, R)
+    return module:lrp(I, R)
   end
 
   if torch.typename(module) == 'nn.Reshape' then
-    return R:clone():viewAs(I)
+    return module:lrp(I, R)
   end
 
   if torch.typename(module) == 'nn.SplitTable' then
-    return torch.cat(R, module.dimension)
+    return module:lrp(I, R)
   end
 
   if torch.typename(module) == 'nn.LookupTable' then
@@ -200,71 +202,162 @@ function relevance_propagate(node, R)
   end
 
   -- All other cases: pass-through
-  return R
+  return module:lrp(I, R)
 end
 
+function nn.Module:lrp(input, relevance)
+  if self.initialized_lrp == nil then
+    self.initialized_lrp = true
 
--- Morrored as closely as possible from Arras's LRP_for_lstm
+    self.Rin = torch.CudaTensor()
+  end
+
+  self.Rin:resizeAs(relevance):copy(relevance)
+
+  return self.Rin
+end
+
+function nn.Reshape:lrp(input, relevance)
+  if self.initialized_lrp == nil then
+    self.initialized_lrp = true
+
+    self.Rin = torch.CudaTensor()
+  end
+
+  self.Rin:resizeAs(input):copy(relevance:viewAs(input))
+
+  return self.Rin
+end
+
+function nn.SplitTable:lrp(input, relevance)
+  if self.initialized_lrp == nil then
+    self.initialized_lrp = true
+
+    self.Rin = torch.CudaTensor()
+  end
+
+  local dimension = self:_getPositiveDimension(input)
+
+  self.Rin:resizeAs(input)
+  for i=1,#relevance do
+    self.Rin:select(dimension, i):copy(relevance[i])
+  end
+
+  return self.Rin
+end
+
+-- MulTable, AddTable, Linear mirrored as closely as possible
+-- from Arras's LRP_for_lstm
 local eps = 0.001
-function lrp_linear(hin, module, relevance)
-  local w = module.weight:t():clone():contiguous()
-  local b = module.bias
-  local bias_factor = 1
 
-  hin = hin:clone():contiguous()
+function nn.CMulTable:lrp(input, relevance, true_index)
+  if self.initialized_lrp == nil then
+    self.initialized_lrp = true
 
-  -- No bias means zero bias
-  if b == nil then b = relevance[1]:clone():zero() end
-  b = b:clone():contiguous()
+    self.Rin = {}
+  end
 
-  local D = hin:size(2) -- Input has size batch x D
-  local M = relevance:size(2) -- Output has size batch x M
-  local batch = hin:size(1)
+  for i=1,#input do
+    self.Rin[i] = self.Rin[i] or input[i].new()
+    if i == true_index then
+      self.Rin[i]:resizeAs(relevance):copy(relevance)
+    else
+      self.Rin[i]:resizeAs(relevance):zero()
+    end
+  end
 
-  -- Compute output. Linear layers always transform one-to-one,
-  -- so this is indeed the output.
-
-  local hout = torch.mm(hin, w) + b:view(1, M):expand(batch, M)
-  local bias_nb_units = D
-
-  -- Take sign, positive when zero
-  local sign_out = torch.sign(hout) --:clone():fill(1)
-  sign_out:add(torch.eq(hout, 0):cuda())
-
-  local numer = w:view(1, D, M):expand(batch, D, M):clone()
-  numer:cmul(hin:view(batch, D, 1):expand(batch, D, M))
-  numer:add((bias_factor * b:view(1, 1, M) / bias_nb_units):expand(batch, D, M))
-  numer:add((eps * sign_out:view(batch, 1, M) / bias_nb_units):expand(batch, D, M))
-
-  local denom = (hout + eps * sign_out):view(batch, 1, M):expand(batch, D, M) -- Size b x D x M
-
-  local message = torch.cmul(torch.cdiv(numer, denom), relevance:view(batch, 1, M):expand(batch, D, M)) -- Size b x D x M
-
-  local Rin = message:sum(3) -- Size b x D
-
-  return Rin
+  return self.Rin
 end
 
-function lrp_add(inputs, R)
-  sum_inputs = inputs[1]:clone()
-  for i=2,#inputs do
-    sum_inputs:add(inputs[i])
+local global_shared_numers = {}
+
+function create_global_shared_numer(D, M)
+  local key = D .. 'x' .. M
+  if global_shared_numers[key] == nil then
+    global_shared_numers[key] = torch.CudaTensor()
+  end
+  return global_shared_numers[key]
+end
+
+function nn.Linear:lrp(input, relevance)
+  local start = os.clock()
+
+  -- Allocate memory we need for LRP here.
+  if self.initialized_lrp == nil then
+    self.initialized_lrp = true
+
+    self.D = self.weight:size(2)
+    self.M = self.weight:size(1)
+    --self.transpose_weight = self.weight:t():clone() -- Transpose and contiguous, for speed reasons
+
+    --self.numer = create_global_shared_numer(self.D, self.M) -- Need to share this particular memory with other Linear instances
+    self.hin = torch.CudaTensor()
+    if self.bias then
+      self.norm_bias = self.bias:clone():div(self.D)
+    end
+
+    self.denom = torch.CudaTensor()
+    self.denom_sign = torch.CudaTensor()
+    self.denom_sign_clone = torch.CudaTensor()
+
+    self.Rin = torch.CudaTensor()
   end
 
-  sign_sum = torch.sign(sum_inputs)
-  sign_sum:add(torch.eq(sum_inputs, 0):cuda())
 
-  sum_inputs:add(eps * sign_sum)
+  local b = relevance:size(1)
 
-  local factors = {}
-  for i=1,#inputs do
-    table.insert(factors, torch.cdiv(inputs[i], sum_inputs))
+  -- Perform LRP propagation
+  -- First, determine sign.
+  self.denom:resizeAs(self.output):copy(self.output)
+
+  self.denom_sign:resizeAs(self.output):copy(self.denom):sign()
+  self.denom_sign_clone:resizeAs(self.output)
+  self.denom_sign_clone:copy(self.denom_sign)
+  self.denom_sign_clone:pow(2) -- pow(2) is faster than abs()
+  self.denom_sign_clone:csub(1) -- This is now -1 at 0 and 0 everywhere else
+  self.denom_sign:csub(self.denom_sign_clone) -- Fast in-place true sign
+
+  -- Add epsilon to the denominator and invert
+  self.denom:add(self.denom_sign:mul(eps)):cinv():cmul(relevance)
+
+  self.Rin:resizeAs(input):zero()
+  self.Rin:addmm(0, self.Rin, 1, self.denom, self.weight)
+
+  self.Rin:cmul(input)
+
+  -- Return
+  return self.Rin
+end
+
+function nn.CAddTable:lrp(input, relevance)
+  if self.initialized_lrp == nil then
+    self.initialized_lrp = true
+
+    self.sum_inputs = torch.CudaTensor()
+    self.sign_sum = torch.CudaTensor()
+    self.sign_sum_clone = torch.CudaTensor()
+
+    self.results = {}
   end
 
-  local relevances = {}
-  for i=1,#inputs do
-    table.insert(relevances, torch.cmul(R, factors[i]))
+  -- Get output and stabilize
+  self.sum_inputs:resizeAs(self.output):copy(self.output)
+  self.sign_sum:resizeAs(self.output):copy(self.sum_inputs):sign()
+  self.sign_sum_clone:resizeAs(self.output):copy(self.sign_sum):abs():csub(1)
+  self.sign_sum:csub(self.sign_sum_clone) -- Fast in-place true sign
+
+  self.sum_inputs:add(self.sign_sum:mul(eps)):cinv()
+
+  -- Scale relevance as input contributions
+  for i=1,#input do
+    self.results[i] = self.results[i] or input[1].new()
+    self.results[i]:resizeAs(input[i]):copy(input[i]):cmul(self.sum_inputs):cmul(relevance)
   end
 
-  return relevances
+  -- Return
+  for i=#input+1,#self.results do
+    self.results[i] = nil
+  end
+
+  return self.results
 end

@@ -22,8 +22,8 @@ require 'sensitivity-analysis'
 require 'lime'
 require 'erasure'
 
-ProFi = require 'ProFi'
-ProFi:start()
+--ProFi = require 'ProFi'
+--ProFi:start()
 
 require 'json'
 
@@ -133,7 +133,8 @@ function get_all_saliencies(
     activations[t] = (rnn_state[#rnn_state][1] - normalizer[1][1]):cdiv(normalizer[2][1])
   end
 
-  -- SmoothGrad saliency
+  local start = os.clock()
+  -- First-derivative sensitivity analysis
   print('Computing SA')
   local sa = sensitivity_analysis(
       opt,
@@ -142,6 +143,10 @@ function get_all_saliencies(
       normalizer,
       sentence
   )
+  print('Elapsed time:', os.clock() - start)
+  start = os.clock()
+
+  -- SmoothGrad saliency
   print('Computing SmoothGrad...')
   local smooth_grad_saliency = smooth_grad(
       opt,
@@ -152,6 +157,8 @@ function get_all_saliencies(
       num_perturbations,
       perturbation_size
   )
+  print('Elapsed time:', os.clock() - start)
+  start = os.clock()
 
   -- LRP saliency
   print('Computing LRP...')
@@ -162,6 +169,8 @@ function get_all_saliencies(
       normalizer,
       sentence
   )
+  print('Elapsed time:', os.clock() - start)
+  start = os.clock()
 
   print('Computing LIME...')
   local lime_saliency = lime(
@@ -170,9 +179,11 @@ function get_all_saliencies(
       encoder_clones,
       normalizer,
       sentence,
-      num_perturbations * 40, -- Lime requires many more perturbations than SmoothGrad
+      num_perturbations * 10, -- Lime requires many more perturbations than SmoothGrad
       perturbation_size
   )
+  print('Elapsed time:', os.clock() - start)
+  start = os.clock()
 
   print('Computing erasure...')
   local erasure_saliency = erasure(
@@ -182,6 +193,7 @@ function get_all_saliencies(
       normalizer,
       sentence
   )
+  print('Elapsed time:', os.clock() - start)
 
   return {
     ['sgrad'] = smooth_grad_saliency,
@@ -288,5 +300,5 @@ end
 
 main()
 
-ProFi:stop()
-ProFi:writeReport('profile.txt')
+--ProFi:stop()
+--ProFi:writeReport('profile.txt')
