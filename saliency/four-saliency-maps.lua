@@ -18,7 +18,7 @@ require 's2sa.model_utils'
 
 require 'smooth-grad'
 require 'layerwise-relevance-propagation'
-require 'sensitivity-analysis'
+--require 'sensitivity-analysis'
 require 'lime'
 require 'erasure'
 
@@ -136,13 +136,13 @@ function get_all_saliencies(
   local start = os.clock()
   -- First-derivative sensitivity analysis
   print('Computing SA')
-  local sa = sensitivity_analysis(
+  local sa = nil --[[sensitivity_analysis(
       opt,
       alphabet,
       encoder_clones,
       normalizer,
       sentence
-  )
+  )]]
   print('Elapsed time:', os.clock() - start)
   start = os.clock()
 
