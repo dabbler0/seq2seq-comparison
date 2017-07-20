@@ -159,7 +159,7 @@ function get_all_saliencies(
   print('act elapsed:', act_elapsed_time - start)
   start = os.clock()
 
-  start = os.clock()
+  --[[
   -- First-derivative sensitivity analysis
   local sa = sensitivity_analysis(
       alphabet,
@@ -170,6 +170,7 @@ function get_all_saliencies(
   local sa_elapsed_time = os.clock() - start
   print('sa elapsed:', sa_elapsed_time)
   start = os.clock()
+  ]]
 
   -- SmoothGrad saliency
   local smooth_grad_saliency = smooth_grad(
@@ -215,6 +216,7 @@ function get_all_saliencies(
       sentence
   )
   local erasure_elapsed_time = os.clock() - start
+  print('erasure elapsed:', erasure_elapsed_time)
 
   return {
     ['saliencies'] = {
