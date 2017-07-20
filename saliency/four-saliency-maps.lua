@@ -63,6 +63,7 @@ function create_split_encoder_clones(checkpoint, max_len)
     end
   end)
 
+  encoder:evaluate()
   encoder = encoder:cuda()
   lookuptable_module = lookuptable_module:cuda()
   linear_module = linear_module:cuda()
