@@ -26,11 +26,6 @@ require 'json'
 
 torch.manualSeed(0)
 
-function printMemProfile()
-  free, total = cutorch.getMemoryUsage()
-  print('GPU MEMORY FREE: ', free, 'of', total)
-end
-
 function head_table(t, index)
   result = {}
   for i=1,index do
@@ -164,8 +159,6 @@ function get_all_saliencies(
   print('act elapsed:', act_elapsed_time - start)
   start = os.clock()
 
-  printMemProfile()
-
   start = os.clock()
   -- First-derivative sensitivity analysis
   local sa = sensitivity_analysis(
@@ -177,8 +170,6 @@ function get_all_saliencies(
   local sa_elapsed_time = os.clock() - start
   print('sa elapsed:', sa_elapsed_time)
   start = os.clock()
-
-  printMemProfile()
 
   -- SmoothGrad saliency
   local smooth_grad_saliency = smooth_grad(
@@ -192,8 +183,6 @@ function get_all_saliencies(
   local sgrad_elapsed_time = os.clock() - start
   print('sgrad elapsed:', sgrad_elapsed_time)
   start = os.clock()
-
-  printMemProfile()
 
   -- LRP saliency
   local layerwise_relevance_saliency = LRP_saliency(
@@ -215,8 +204,6 @@ function get_all_saliencies(
       perturbation_size
   )
 
-  printMemProfile()
-
   local lime_elapsed_time = os.clock() - start
   print('lime elapsed:', lime_elapsed_time)
   start = os.clock()
@@ -228,8 +215,6 @@ function get_all_saliencies(
       sentence
   )
   local erasure_elapsed_time = os.clock() - start
-
-  printMemProfile()
 
   return {
     ['saliencies'] = {
