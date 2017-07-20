@@ -55,7 +55,7 @@ function LRP_saliency(
       relevances,
       torch.Tensor(opt.rnn_size, opt.rnn_size):zero():cuda()
     )
-  end
+  end -- TODO leak
 
   -- Relevance at point x is f(x) / var(f(x))
   table.insert(
@@ -205,31 +205,11 @@ function relevance_propagate(node, R)
   return module:lrp(I, R)
 end
 
-function clearGrad(module) end
---[[
-function clearGrad(module)
-  -- Remove grad output and grad input
-  -- to make space
-  if module.gradOutput then
-    module.gradOutput:resize(1)
-  end
-  if module.gradInput then
-    if type(module.gradInput) == 'table' then
-      for i=1,#module.gradInput do
-        module.gradInput[i]:resize(1)
-      end
-    else
-      module.gradInput:resize(1)
-    end
-  end
-end
-]]
-
 function nn.Module:lrp(input, relevance)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.Rin = self.gradInput --torch.CudaTensor()
+    self.Rin = self.gradInput
   end
 
   self.Rin:resizeAs(relevance):copy(relevance)
@@ -241,7 +221,7 @@ function nn.Reshape:lrp(input, relevance)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.Rin = self.gradInput --torch.CudaTensor()
+    self.Rin = self.gradInput
   end
 
   self.Rin:resizeAs(input):copy(relevance:viewAs(input))
@@ -253,7 +233,7 @@ function nn.SplitTable:lrp(input, relevance)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.Rin = self.gradInput --torch.CudaTensor()
+    self.Rin = self.gradInput
   end
 
   local dimension = self:_getPositiveDimension(input)
@@ -301,10 +281,10 @@ function nn.Linear:lrp(input, relevance, use_bias)
     self.D = self.weight:size(2)
     self.M = self.weight:size(1)
 
-    self.denom = denom --self.output --self.gradOutput --torch.CudaTensor()
+    self.denom = denom
 
-    self.denom_sign = denom_sign --self.gradOutput --torch.CudaTensor()
-    self.denom_sign_clone = denom_sign_clone --torch.CudaTensor()
+    self.denom_sign = denom_sign
+    self.denom_sign_clone = denom_sign_clone
 
     self.Rin = self.gradInput --torch.CudaTensor()
   end
@@ -350,9 +330,9 @@ function nn.CAddTable:lrp(input, relevance)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.sum_inputs = sum_inputs --self.output --torch.CudaTensor()
-    self.sign_sum = sign_sum --self.gradOutput --torch.CudaTensor()
-    self.sign_sum_clone = sign_sum_clone --torch.CudaTensor()
+    self.sum_inputs = sum_inputs
+    self.sign_sum = sign_sum
+    self.sign_sum_clone = sign_sum_clone
 
     self.results = self.gradInput
   end

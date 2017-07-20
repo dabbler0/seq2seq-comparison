@@ -70,7 +70,5 @@ function erasure(
     table.insert(affinity, results[t]:csub(reference):cdiv(reference))
   end
 
-  print("WHAT THE HECK")
-
   return affinity
 end
