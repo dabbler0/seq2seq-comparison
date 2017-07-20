@@ -15,77 +15,70 @@ function slice_table(t, index)
   return result
 end
 
+local affinities = torch.CudaTensor()
+local affinities_clone = torch.CudaTensor()
+local cumulative_affinities = torch.CudaTensor()
+local source = torch.CudaTensor()
+local first_hidden = {}
+
 function smooth_grad(
-    opt,
     alphabet,
-    encoder_clones,
+    model,
     normalizer,
     sentence,
     num_perturbations,
     perturbation_size)
 
+  affinities:resize(#sentence, opt.rnn_size):zero()
+  affinities_clone:resizeAs(affinities):zero()
+  cumulative_affinities:resizeAs(affinities):zero()
+
+  source:resize(#alphabet):zero()
+
   -- Default arguments
   if num_perturbations == nil then num_perturbations = 3 end
   if perturbation_size == nil then perturbation_size = 11 end
 
-  local alphabet_size = #alphabet
-  local length = #sentence
+  local opt, encoder_clones, linear = model.opt, model.clones, model.linear
 
   local mean, stdev = normalizer[1], normalizer[2]
 
-  local all_params = torch.Tensor(length * alphabet_size):zero():cuda() --uniform()
-  local affinities = torch.Tensor(length, opt.rnn_size):zero():cuda()
-  local cumulative_affinities = torch.Tensor(length, opt.rnn_size):zero():cuda()
-
-  local current_source = {}
-  local current_source_view = {}
-
-  -- Source one-hots
-  for t=1,length do
-    table.insert(
-      current_source,
-      all_params:narrow(1, (t-1)*alphabet_size + 1, alphabet_size):view(1, alphabet_size)
-    )
-  end
-
-  -- Expand source one-hots to batch size 500; one for each output neuron
-  for t=1,length do
-    current_source_view[t] = current_source[t]:expand(opt.rnn_size, alphabet_size)
-  end
-
-  local source_gradients = {}
-
   -- Construct beginning hidden state
-  local first_hidden = {}
   for i=1,2*opt.num_layers do
-    table.insert(
-      first_hidden,
-      --all_params:narrow(1, 1 + length*alphabet_size + opt.rnn_size*(i-1), opt.rnn_size):view(1, opt.rnn_size)
-      torch.Tensor(1, opt.rnn_size):zero():cuda():expand(opt.rnn_size, opt.rnn_size)
-    )
+    first_hidden[i] = first_hidden[i] or torch.CudaTensor()
+    first_hidden[i]:resize(opt.rnn_size, opt.rnn_size):zero()
+  end
+  for i=2*opt.num_layers+1,#first_hidden do
+    first_hidden[i] = nil
   end
 
   -- Gradient-retrieval function
-  function get_gradient(all_params, length)
+  function get_gradient()
     affinities:zero()
 
-    local softmax = {}
-    for i=1,length do
-      local layer = nn.Sequential()
-      -- Softmax layer (currently unused in favor of Normalize)
-      layer:add(nn.SoftMax())
-      --layer:add(nn.Normalize(1))
-
-      table.insert(softmax, layer:cuda())
-    end
+    -- Softmax layer
+    local softmax = nn.Sequential()
+    softmax:add(nn.SoftMax())
+    softmax:cuda()
 
     -- Forward pass
     local rnn_state = first_hidden
-    local encoder_inputs = {}
-    for t=1,length do
-      local encoder_input = {softmax[t]:forward(current_source_view[t])}
+    local softmax_derivatives = {}
+    for t=1,#sentence do
+      source:uniform()
+      source[sentence[t]] = perturbation_size
+
+      local softmaxed = softmax:forward(source)
+
+      local encoder_input = {
+        linear:forward(
+          softmaxed
+        ):view(1, opt.rnn_size):expand(opt.rnn_size, opt.rnn_size)
+      }
       append_table(encoder_input, rnn_state)
-      encoder_inputs[t] = encoder_input
+
+      table.insert(softmax_derivatives, softmaxed[sentence[t]] * (1 - softmaxed[sentence[t]]))
+
       rnn_state = encoder_clones[t]:forward(encoder_input)
     end
 
@@ -112,44 +105,35 @@ function smooth_grad(
 
     -- Initialize.
     local rnn_state_gradients = {}
-    rnn_state_gradients[length] = last_hidden
+    rnn_state_gradients[#sentence] = last_hidden
 
-    for t=length,1,-1 do
-      local encoder_input_gradient = encoder_clones[t]:backward(encoder_inputs[t], rnn_state_gradients[t])
-      -- Get source gradients and copy into gradient array
-      local final_gradient = softmax[t]:backward(current_source_view[t], encoder_input_gradient[1])
+    for t=#sentence,1,-1 do
+      local encoder_input_gradient = encoder_clones[t]:backward(
+        encoder_clones[t].innode.input, -- Use existing stored input
+        rnn_state_gradients[t]
+      )
 
-      affinities[t]:copy(final_gradient[{{}, sentence[t]}])
+      local embedding_gradient = encoder_input_gradient[1]
+
+      -- The gradient wrt the softmaxed one-hot index Oi is
+      -- df/dE * dE/dOi
+      affinities[t]:addmv(
+        0,
+        affinities[t],
+        softmax_derivatives[t], -- softmax derivative s(1 - s)
+        embedding_gradient, linear.weight[{{}, sentence[t]}]
+      )
 
       -- Get RNN state gradients
       rnn_state_gradients[t-1] = slice_table(encoder_input_gradient, 2)
     end
 
-    return loss --grad_params
+    return affinities
   end
 
-  local saliency_maps = {}
-
-  all_params:zero()
-  affinities:zero()
-  cumulative_affinities:zero()
-
   -- Do several perturbations
-  local length = #sentence
   for i=1,num_perturbations do
-    -- Give all the other parameters a little bit of probability
-    all_params:uniform() --:mul(perturbation_size / alphabet_size)
-    -- all_params:zero() -- Zero it for softmax
-    -- all_params:uniform()
-
-    -- Start at a given sentence
-    for t=1,length do
-      current_source[t][1][sentence[t]] = perturbation_size
-      -- e^x will be just a little bit more than all the other probabilities combined
-    end
-
-    get_gradient(all_params, length)
-    cumulative_affinities:add(affinities)
+    cumulative_affinities:add(get_gradient())
   end
 
   -- Average
@@ -157,7 +141,7 @@ function smooth_grad(
 
   -- Get affinity for each token in the sentence
   local result_affinity = {}
-  for t=1,length do
+  for t=1,#sentence do
     table.insert(result_affinity, cumulative_affinities[t])
   end
 

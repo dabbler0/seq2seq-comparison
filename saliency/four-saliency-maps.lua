@@ -22,12 +22,14 @@ require 'sensitivity-analysis'
 require 'lime'
 require 'erasure'
 
---ProFi = require 'ProFi'
---ProFi:start()
-
 require 'json'
 
 torch.manualSeed(0)
+
+function printMemProfile()
+  free, total = cutorch.getMemoryUsage()
+  print('GPU MEMORY FREE: ', free, 'of', total)
+end
 
 function head_table(t, index)
   result = {}
@@ -37,27 +39,40 @@ function head_table(t, index)
   return result
 end
 
-function create_encoder_clones(checkpoint, max_len)
+-- Split the first layer (word embedding layer) off from the
+-- rest of the network, so that it can be run differently.
+function create_split_encoder_clones(checkpoint, max_len)
   local encoder, opt = checkpoint[1][1], checkpoint[2]
+
+  local lookuptable_module = nil
+  local linear_module = nil
+
   encoder:replace(function(module)
-    -- Replace instances of nn.LookupTable with similarly-sized Linear layer,
-    -- so that we can backprop across it continuously
     if torch.typename(module) == 'nn.LookupTable' then
       local weight = module.weight
       local layer = nn.Linear(weight:size(1), weight:size(2), false)
 
       layer.weight = weight:t()
 
-      return layer
+      linear_module = layer
+      lookuptable_module = module
+
+      return nn.Identity()
     else
       return module
     end
   end)
 
   encoder = encoder:cuda()
-  encoder:evaluate()
+  lookuptable_module = lookuptable_module:cuda()
+  linear_module = linear_module:cuda()
 
-  return clone_many_times(encoder, max_len), opt
+  return {
+    ['lookup'] = lookuptable_module,
+    ['linear'] = linear_module,
+    ['clones'] = clone_many_times(encoder, max_len),
+    ['opt'] = opt
+  }
 end
 
 function idx2key(file)
@@ -81,6 +96,14 @@ function invert_table(t)
   return r
 end
 
+function token_length(line)
+  local k = 1
+  for entry in line:gmatch'([^%s]+)' do
+    k = k + 1
+  end
+  return k
+end
+
 function tokenize(line, inverse_alphabet)
   -- Tokenize the start line
   local tokens = {
@@ -101,24 +124,28 @@ function tokenize(line, inverse_alphabet)
   return tokens
 end
 
+function deep_totable(tbl)
+  local result = {}
+  for i=1,#tbl do
+    table.insert(result, tbl[i]:totable())
+  end
+  return result
+end
+
 function get_all_saliencies(
-    opt,
     alphabet,
-    encoder_clones,
+    model,
     normalizer,
     sentence,
     num_perturbations,
     perturbation_size)
 
   -- Find raw activations.
+  opt = model['opt']
+  encoder_clones = model['clones']
+  lookup_layer = model['lookup']
 
-  -- inputs
-  local one_hot_inputs = {}
-  for t=1,#sentence do
-    one_hot_inputs[t] = torch.Tensor(1, #alphabet):zero():cuda()
-    one_hot_inputs[t][1][sentence[t]] = 1
-  end
-
+  local start = os.clock()
   -- rnn state
   local rnn_state = {}
   for i=1,2*opt.num_layers do
@@ -127,81 +154,98 @@ function get_all_saliencies(
 
   local activations = {}
   for t=1,#sentence do
-    local inp = {one_hot_inputs[t]}
+    local inp = {lookup_layer:forward(torch.CudaTensor{sentence[t]})}
     append_table(inp, rnn_state)
     rnn_state = encoder_clones[t]:forward(inp)
     activations[t] = (rnn_state[#rnn_state][1] - normalizer[1][1]):cdiv(normalizer[2][1])
   end
+  local act_elapsed_time = os.clock()
+  print('act elapsed:', act_elapsed_time - start)
+  start = os.clock()
 
-  local start = os.clock()
+  printMemProfile()
+
+  start = os.clock()
   -- First-derivative sensitivity analysis
-  print('Computing SA')
   local sa = sensitivity_analysis(
-      opt,
       alphabet,
-      encoder_clones,
+      model,
       normalizer,
       sentence
   )
-  print('Elapsed time:', os.clock() - start)
+  local sa_elapsed_time = os.clock() - start
+  print('sa elapsed:', sa_elapsed_time)
   start = os.clock()
 
+  printMemProfile()
+
   -- SmoothGrad saliency
-  print('Computing SmoothGrad...')
   local smooth_grad_saliency = smooth_grad(
-      opt,
       alphabet,
-      encoder_clones,
+      model,
       normalizer,
       sentence,
       num_perturbations,
       perturbation_size
   )
-  print('Elapsed time:', os.clock() - start)
+  local sgrad_elapsed_time = os.clock() - start
+  print('sgrad elapsed:', sgrad_elapsed_time)
   start = os.clock()
 
+  printMemProfile()
+
   -- LRP saliency
-  print('Computing LRP...')
   local layerwise_relevance_saliency = LRP_saliency(
-      opt,
       alphabet,
-      encoder_clones,
+      model,
       normalizer,
       sentence
   )
-  print('Elapsed time:', os.clock() - start)
+  local lrp_elapsed_time = os.clock() - start
+  print('lrp elapsed:', sgrad_elapsed_time)
   start = os.clock()
 
-  print('Computing LIME...')
   local lime_saliency = lime(
-      opt,
       alphabet,
-      encoder_clones,
+      model,
       normalizer,
       sentence,
       num_perturbations * 10, -- Lime requires many more perturbations than SmoothGrad
       perturbation_size
   )
-  print('Elapsed time:', os.clock() - start)
+
+  printMemProfile()
+
+  local lime_elapsed_time = os.clock() - start
+  print('lime elapsed:', lime_elapsed_time)
   start = os.clock()
 
-  print('Computing erasure...')
   local erasure_saliency = erasure(
-      opt,
       alphabet,
-      encoder_clones,
+      model,
       normalizer,
       sentence
   )
-  print('Elapsed time:', os.clock() - start)
+  local erasure_elapsed_time = os.clock() - start
+
+  printMemProfile()
 
   return {
-    ['sgrad'] = smooth_grad_saliency,
-    ['lrp'] = layerwise_relevance_saliency,
-    ['lime'] = lime_saliency,
-    ['erasure'] = erasure_saliency,
-    ['sa'] = sa,
-    ['activat'] = activations
+    ['saliencies'] = {
+      ['sgrad'] = deep_totable(smooth_grad_saliency),
+      ['lrp'] = deep_totable(layerwise_relevance_saliency),
+      ['lime'] = deep_totable(lime_saliency),
+      ['erasure'] = deep_totable(erasure_saliency),
+      ['sa'] = deep_totable(sa),
+    },
+    ['times'] = {
+      ['sgrad'] = sgrad_elapsed_time,
+      ['lrp'] = lrp_elapsed_time,
+      ['lime'] = lime_elapsed_time,
+      ['erasure'] = erasure_elapsed_time,
+      ['sa'] = sa_elapsed_time
+    },
+    ['activations'] = activations
   }
 
 end
@@ -210,14 +254,15 @@ function main()
   cmd = torch.CmdLine()
 
   cmd:option('-model_list', '', 'List of models with alphabets (alternating lines)')
+  cmd:option('-src_file', '', 'Source (en.tok) file for sampling over')
+  cmd:option('-out_file', '', 'Output file to write json descriptions')
   cmd:option('-max_len', 30, 'Maximum length')
-  cmd:option('-num_perturbations', 3, 'Number of perturbations over which to average')
-  cmd:option('-perturbation_size', 11, 'Number of perturbations over which to average')
+  cmd:option('-num_perturbations', 3, 'Perturbations scale; LIME will use 10n while SmoothGrad will use n')
+  cmd:option('-perturbation_size', 11, 'Larger number means smaller perturbation')
 
   local opt = cmd:parse(arg)
 
   local models = {}
-  local opts = {}
   local alphabets = {}
   local inverse_alphabets = {}
   local normalizers = {}
@@ -229,7 +274,7 @@ function main()
     if model_name == nil then break end
     local model_key = model_name:match("%a%a%-%a%a%-%d")
     io.stderr:write('Loading ' .. model_name .. ' as ' .. model_key .. '\n')
-    models[model_key], opts[model_key] = create_encoder_clones(torch.load(model_name), opt.max_len)
+    models[model_key] = create_split_encoder_clones(torch.load(model_name), opt.max_len)
 
     local dict_name = model_file:read("*line")
     if dict_name == nil then break end
@@ -256,6 +301,12 @@ function main()
 
   io.stderr:write('Loaded all models.\n')
 
+  local sample_file = io.open(opt.src_file)
+
+  local line_no = 1
+  local net_description = {}
+  local indices = {}
+
   while true do
     local network = io.read()
     if network == 'end' then return end
@@ -268,7 +319,6 @@ function main()
     end
 
     local saliencies = get_all_saliencies(
-      opts[network],
       alphabets[network],
       models[network],
       normalizers[network],
@@ -278,27 +328,20 @@ function main()
     )
 
     local str = 'activat'
-    local p = saliencies['activat']
+    local p = saliencies['activations']
     for i=1,#p do
       str = str .. '\t' .. string.format('%.3f', p[i][433])
     end
     print(str)
 
-    for k,p in pairs(saliencies) do
-      if k ~= 'activat' then
-        str = k
-        for i=1,#p do
-          str = str .. '\t' .. string.format('%.3f', p[i][433])
-        end
-        print(str)
+    for k,p in pairs(saliencies['saliencies']) do
+      str = k
+      for i=1,#p do
+        str = str .. '\t' .. string.format('%.3f', p[i][433])
       end
+      print(str)
     end
-
-    --print(json.encode(saliencies))
   end
 end
 
 main()
-
---ProFi:stop()
---ProFi:writeReport('profile.txt')

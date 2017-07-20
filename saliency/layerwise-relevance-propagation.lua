@@ -16,28 +16,34 @@ function slice_table(src, index)
   return result
 end
 
+function printMemProfile()
+  free, total = cutorch.getMemoryUsage()
+  print('GPU MEMORY FREE: ', free, 'of', total)
+end
+
+local first_hidden = {}
+
 function LRP_saliency(
-    opt,
     alphabet,
-    encoder_clones,
+    model,
     normalizer,
     sentence)
 
-  local first_hidden = {}
+  local opt, encoder_clones, lookup = model.opt, model.clones, model.lookup
+
+  -- Construct beginning hidden state
   for i=1,2*opt.num_layers do
-    table.insert(first_hidden, torch.Tensor(1, opt.rnn_size):zero():cuda():expand(opt.rnn_size, opt.rnn_size))
+    first_hidden[i] = first_hidden[i] or torch.CudaTensor()
+    first_hidden[i]:resize(opt.rnn_size, opt.rnn_size):zero()
+  end
+  for i=2*opt.num_layers+1,#first_hidden do
+    first_hidden[i] = nil
   end
 
-  local one_hots = {}
-  for t=1,#sentence do
-    one_hots[t] = torch.Tensor(1, #alphabet):zero():cuda()
-    one_hots[t][1][sentence[t]] = 1
-    one_hots[t] = one_hots[t]:expand(opt.rnn_size, #alphabet)
-  end
-
+  -- Forward pass
   local rnn_state = first_hidden
   for t=1,#sentence do
-    local encoder_input = {one_hots[t]}
+    local encoder_input = {lookup:forward(torch.CudaTensor{sentence[t]}:expand(opt.rnn_size))}
     append_table(encoder_input, rnn_state)
     rnn_state = encoder_clones[t]:forward(encoder_input)
   end
@@ -61,7 +67,11 @@ function LRP_saliency(
   local input_relevances = {}
   for t=#sentence,1,-1 do
     relevance_state = LRP(encoder_clones[t], relevance_state)
-    input_relevances[t] = relevance_state[1]:view(opt.rnn_size):clone() -- batch_size x alphabet_size, summed -> batch_size
+
+    -- The input relevance state should now be a 500x500 vector representing
+    -- total relevance over the word embedding. Summing over the second
+    -- dimension will get us the desired relevances.
+    input_relevances[t] = relevance_state[1]:sum(2):view(opt.rnn_size)
     relevance_state = slice_table(relevance_state, 2)
   end
 
@@ -99,11 +109,7 @@ function LRP(gmodule, R)
     local relevance = relevances[node]
 
     -- Propagate input relevance
-    local start = os.clock()
     local input_relevance = relevance_propagate(node, relevance)
-    if os.clock() - start > 0.1 then
-      print('Slow:', torch.typename(node.module), os.clock() - start)
-    end
 
     if #node.mapindex == 1 then
       -- Case 1: Select node
@@ -179,12 +185,6 @@ function relevance_propagate(node, R)
   end
 
   if torch.typename(module) == 'nn.Linear' then
-    -- For the closest-to-input layer, don't try to do the linear
-    -- propagation because it's suuuper memory intensive
-    if I:size(2) > 50000 then
-      return R:sum(2)
-    end
-
     return module:lrp(I, R)
   end
 
@@ -205,11 +205,31 @@ function relevance_propagate(node, R)
   return module:lrp(I, R)
 end
 
+function clearGrad(module) end
+--[[
+function clearGrad(module)
+  -- Remove grad output and grad input
+  -- to make space
+  if module.gradOutput then
+    module.gradOutput:resize(1)
+  end
+  if module.gradInput then
+    if type(module.gradInput) == 'table' then
+      for i=1,#module.gradInput do
+        module.gradInput[i]:resize(1)
+      end
+    else
+      module.gradInput:resize(1)
+    end
+  end
+end
+]]
+
 function nn.Module:lrp(input, relevance)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.Rin = torch.CudaTensor()
+    self.Rin = self.gradInput --torch.CudaTensor()
   end
 
   self.Rin:resizeAs(relevance):copy(relevance)
@@ -221,7 +241,7 @@ function nn.Reshape:lrp(input, relevance)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.Rin = torch.CudaTensor()
+    self.Rin = self.gradInput --torch.CudaTensor()
   end
 
   self.Rin:resizeAs(input):copy(relevance:viewAs(input))
@@ -233,7 +253,7 @@ function nn.SplitTable:lrp(input, relevance)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.Rin = torch.CudaTensor()
+    self.Rin = self.gradInput --torch.CudaTensor()
   end
 
   local dimension = self:_getPositiveDimension(input)
@@ -254,7 +274,7 @@ function nn.CMulTable:lrp(input, relevance, true_index)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.Rin = {}
+    self.Rin = self.gradInput
   end
 
   for i=1,#input do
@@ -269,26 +289,24 @@ function nn.CMulTable:lrp(input, relevance, true_index)
   return self.Rin
 end
 
-function nn.Linear:lrp(input, relevance, use_bias)
-  local start = os.clock()
+local denom = torch.CudaTensor()
+local denom_sign = torch.CudaTensor()
+local denom_sign_clone = torch.CudaTensor()
 
+function nn.Linear:lrp(input, relevance, use_bias)
   -- Allocate memory we need for LRP here.
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
     self.D = self.weight:size(2)
     self.M = self.weight:size(1)
-    --self.transpose_weight = self.weight:t():clone() -- Transpose and contiguous, for speed reasons
 
-    --self.numer = create_global_shared_numer(self.D, self.M) -- Need to share this particular memory with other Linear instances
-    self.hin = torch.CudaTensor()
+    self.denom = denom --self.output --self.gradOutput --torch.CudaTensor()
 
-    self.denom = torch.CudaTensor()
+    self.denom_sign = denom_sign --self.gradOutput --torch.CudaTensor()
+    self.denom_sign_clone = denom_sign_clone --torch.CudaTensor()
 
-    self.denom_sign = torch.CudaTensor()
-    self.denom_sign_clone = torch.CudaTensor()
-
-    self.Rin = torch.CudaTensor()
+    self.Rin = self.gradInput --torch.CudaTensor()
   end
 
   local b = relevance:size(1)
@@ -324,15 +342,19 @@ function nn.Linear:lrp(input, relevance, use_bias)
   return self.Rin
 end
 
+local sum_inputs = torch.CudaTensor()
+local sign_sum = torch.CudaTensor()
+local sign_sum_clone = torch.CudaTensor()
+
 function nn.CAddTable:lrp(input, relevance)
   if self.initialized_lrp == nil then
     self.initialized_lrp = true
 
-    self.sum_inputs = torch.CudaTensor()
-    self.sign_sum = torch.CudaTensor()
-    self.sign_sum_clone = torch.CudaTensor()
+    self.sum_inputs = sum_inputs --self.output --torch.CudaTensor()
+    self.sign_sum = sign_sum --self.gradOutput --torch.CudaTensor()
+    self.sign_sum_clone = sign_sum_clone --torch.CudaTensor()
 
-    self.results = {}
+    self.results = self.gradInput
   end
 
   -- Get output and stabilize
