@@ -22,6 +22,8 @@ function printMemProfile()
 end
 
 local first_hidden = {}
+local sequence_inputs = {}
+local input_relevances = torch.CudaTensor()
 
 function LRP_saliency(
     alphabet,
@@ -43,7 +45,14 @@ function LRP_saliency(
   -- Forward pass
   local rnn_state = first_hidden
   for t=1,#sentence do
-    local encoder_input = {lookup:forward(torch.CudaTensor{sentence[t]}:expand(opt.rnn_size))}
+    sequence_inputs[t] = sequence_inputs[t] or torch.CudaTensor()
+    sequence_inputs[t]:resize(1, opt.rnn_size)
+    sequence_inputs[t]:copy(
+      lookup:forward(torch.CudaTensor{sentence[t]})
+    )
+    sequence_inputs[t] = sequence_inputs[t]:expand(opt.rnn_size, opt.rnn_size)
+
+    local encoder_input = {sequence_inputs[t]}
     append_table(encoder_input, rnn_state)
     rnn_state = encoder_clones[t]:forward(encoder_input)
   end
@@ -64,18 +73,23 @@ function LRP_saliency(
   )
 
   local relevance_state = relevances
-  local input_relevances = {}
+  input_relevances:resize(#sentence, opt.rnn_size):zero()
   for t=#sentence,1,-1 do
     relevance_state = LRP(encoder_clones[t], relevance_state)
 
     -- The input relevance state should now be a 500x500 vector representing
     -- total relevance over the word embedding. Summing over the second
     -- dimension will get us the desired relevances.
-    input_relevances[t] = relevance_state[1]:sum(2):view(opt.rnn_size)
+    input_relevances:narrow(1, t, 1):sum(relevance_state[1], 2)
     relevance_state = slice_table(relevance_state, 2)
   end
 
-  return input_relevances
+  local affinities = {}
+  for i=1,#sentence do
+    affinities[i] = input_relevances[i]
+  end
+
+  return affinities
 end
 
 function LRP(gmodule, R)
@@ -264,6 +278,10 @@ function nn.CMulTable:lrp(input, relevance, true_index)
     else
       self.Rin[i]:resizeAs(relevance):zero()
     end
+  end
+
+  for i=#input+1,#self.Rin do
+    self.Rin[i] = nil
   end
 
   return self.Rin
