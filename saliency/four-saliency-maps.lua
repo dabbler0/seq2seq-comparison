@@ -111,6 +111,7 @@ function get_all_saliencies(
     perturbation_size)
 
   -- Find raw activations.
+  local start = os.clock()
 
   -- inputs
   local one_hot_inputs = {}
@@ -132,22 +133,10 @@ function get_all_saliencies(
     rnn_state = encoder_clones[t]:forward(inp)
     activations[t] = (rnn_state[#rnn_state][1] - normalizer[1][1]):cdiv(normalizer[2][1])
   end
-
-  local start = os.clock()
-  -- First-derivative sensitivity analysis
-  print('Computing SA')
-  local sa = nil --[[sensitivity_analysis(
-      opt,
-      alphabet,
-      encoder_clones,
-      normalizer,
-      sentence
-  )]]
-  print('Elapsed time:', os.clock() - start)
+  print('act elapsed:', os.cl,ock() - start)
   start = os.clock()
 
   -- SmoothGrad saliency
-  print('Computing SmoothGrad...')
   local smooth_grad_saliency = smooth_grad(
       opt,
       alphabet,
@@ -157,11 +146,10 @@ function get_all_saliencies(
       num_perturbations,
       perturbation_size
   )
-  print('Elapsed time:', os.clock() - start)
+  print('sgrad elapsed:', os.clock() - start)
   start = os.clock()
 
   -- LRP saliency
-  print('Computing LRP...')
   local layerwise_relevance_saliency = LRP_saliency(
       opt,
       alphabet,
@@ -169,10 +157,9 @@ function get_all_saliencies(
       normalizer,
       sentence
   )
-  print('Elapsed time:', os.clock() - start)
+  print('lrp elapsed:', os.clock() - start)
   start = os.clock()
 
-  print('Computing LIME...')
   local lime_saliency = lime(
       opt,
       alphabet,
@@ -182,10 +169,9 @@ function get_all_saliencies(
       num_perturbations * 10, -- Lime requires many more perturbations than SmoothGrad
       perturbation_size
   )
-  print('Elapsed time:', os.clock() - start)
+  print('lime elapsed:', os.clock() - start)
   start = os.clock()
 
-  print('Computing erasure...')
   local erasure_saliency = erasure(
       opt,
       alphabet,
@@ -193,7 +179,7 @@ function get_all_saliencies(
       normalizer,
       sentence
   )
-  print('Elapsed time:', os.clock() - start)
+  print('erasure elapsed:', os.clock() - start)
 
   return {
     ['sgrad'] = smooth_grad_saliency,
