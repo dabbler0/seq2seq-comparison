@@ -133,7 +133,7 @@ function get_all_saliencies(
     rnn_state = encoder_clones[t]:forward(inp)
     activations[t] = (rnn_state[#rnn_state][1] - normalizer[1][1]):cdiv(normalizer[2][1])
   end
-  print('act elapsed:', os.cl,ock() - start)
+  print('act elapsed:', os.clock() - start)
   start = os.clock()
 
   -- SmoothGrad saliency
