@@ -1,6 +1,5 @@
 -- Importance as measured by gradients at slightly permuted positions, as described here:
 -- https://arxiv.org/pdf/1706.03825.pdf
-
 function append_table(dst, src)
   for i = 1, #src do
     table.insert(dst, src[i])
@@ -20,6 +19,12 @@ local affinities_clone = torch.CudaTensor()
 local cumulative_affinities = torch.CudaTensor()
 local source = torch.CudaTensor()
 local first_hidden = {}
+local last_hidden = {}
+
+-- Softmax layer
+local softmax = nn.Sequential()
+softmax:add(nn.SoftMax())
+softmax:cuda()
 
 function smooth_grad(
     alphabet,
@@ -56,11 +61,6 @@ function smooth_grad(
   function get_gradient()
     affinities:zero()
 
-    -- Softmax layer
-    local softmax = nn.Sequential()
-    softmax:add(nn.SoftMax())
-    softmax:cuda()
-
     -- Forward pass
     local rnn_state = first_hidden
     local softmax_derivatives = {}
@@ -88,20 +88,17 @@ function smooth_grad(
     -- Backward pass
 
     -- Construct final gradient
-    local last_hidden = {}
-    for i=1,2*opt.num_layers-1 do
-      table.insert(
-        last_hidden,
-        torch.zeros(opt.rnn_size, opt.rnn_size):cuda()
-      )
+    for i=1,2*opt.num_layers do
+      last_hidden[i] = last_hidden[i] or torch.CudaTensor()
+      last_hidden[i]:resize(opt.rnn_size, opt.rnn_size)
     end
 
-    -- Diagonal matrix of normalizers. This represents 500 batches, one for each dimensions,
-    -- where dimension x is backpropagating relevance for the xth output
-    table.insert(
-      last_hidden,
-      torch.diag(torch.cinv(stdev[1])):cuda()
-    )
+    -- Set the last hidden to this diagonal matrix containing the derivatives of the normalized
+    -- activations wrt the actual activations
+    last_hidden[2 * opt.num_layers]:diag(stdev[1]:cinv())
+
+    -- We just inverted stdev in place so undo that
+    stdev[1]:cinv()
 
     -- Initialize.
     local rnn_state_gradients = {}

@@ -67,7 +67,7 @@ function erasure(
   -- Get affinity for each token in the sentence
   local affinity = {}
   for t=1,#sentence do
-    table.insert(affinity, results[t]:csub(reference):cdiv(reference))
+    table.insert(affinity, results[t]:csub(reference):neg())
   end
 
   return affinity

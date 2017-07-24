@@ -18,6 +18,17 @@ end
 local source = torch.CudaTensor()
 local input_matrix = torch.CudaTensor()
 local output_matrix = torch.CudaTensor()
+local first_hidden = {}
+
+local base = torch.CudaTensor()
+local modifier = torch.CudaTensor()
+local inverse_modifier = torch.CudaTensor()
+local projection = torch.CudaTensor()
+
+-- Softmax layer
+local softmax = nn.Sequential()
+softmax:add(nn.SoftMax())
+softmax:cuda()
 
 function lime(
     alphabet,
@@ -31,21 +42,13 @@ function lime(
 
   local mean, stdev = normalizer[1], normalizer[2]
 
-  source:resize(1, #alphabet)
+  source:resize(opt.rnn_size, #alphabet)
 
   -- Construct beginning hidden state
-  local first_hidden = {}
   for i=1,2*opt.num_layers do
-    table.insert(
-      first_hidden,
-      torch.Tensor(1, opt.rnn_size):zero():cuda()
-    )
+    first_hidden[i] = first_hidden[i] or torch.CudaTensor()
+    first_hidden[i]:resize(opt.rnn_size, opt.rnn_size)
   end
-
-  -- Softmax layer
-  local softmax = nn.Sequential()
-  softmax:add(nn.SoftMax())
-  softmax:cuda()
 
   -- Gradient-retrieval function
   function run_forward(input_vector, output_vector)
@@ -54,7 +57,7 @@ function lime(
     local perturbed_encodings
     for t=1,#sentence do
       source:uniform()
-      source[1][sentence[t]] = perturbation_size * 2 * torch.uniform()
+      source:narrow(2, sentence[t], 1):mul(perturbation_size * 2)
 
       local softmaxed = softmax:forward(source)
 
@@ -65,14 +68,20 @@ function lime(
       }
 
       -- Record amount of perturbation
-      input_vector[t] = softmaxed[1][sentence[t]]
+      input_vector:narrow(2, t, 1):copy(
+        softmaxed:narrow(2, sentence[t], 1)
+      )
 
       append_table(encoder_input, rnn_state)
       rnn_state = encoder_clones[t]:forward(encoder_input)
     end
 
     -- Compute and record normalized loss
-    output_vector:copy(rnn_state[#rnn_state][1]):csub(mean[1]):cdiv(stdev[1])
+    output_vector:copy(rnn_state[#rnn_state]):csub(
+      mean:expandAs(rnn_state[#rnn_state])
+    ):cdiv(
+      stdev:expandAs(rnn_state[#rnn_state])
+    )
 
     return perturbed_encodings, loss
   end
@@ -81,17 +90,37 @@ function lime(
   local lime_data_outputs = {}
 
   -- Do several perturbations
-  input_matrix:resize(num_perturbations, #sentence)
-  output_matrix:resize(num_perturbations, opt.rnn_size)
+  input_matrix:resize(num_perturbations * opt.rnn_size, #sentence)
+  output_matrix:resize(num_perturbations * opt.rnn_size, opt.rnn_size)
 
   for i=1,num_perturbations do
     -- Create the data point for LIME to regress from
-    run_forward(input_matrix[i], output_matrix[i])
+    run_forward(
+      input_matrix:narrow(1, (i-1)*opt.rnn_size+1, opt.rnn_size),
+      output_matrix:narrow(1, (i-1)*opt.rnn_size+1, opt.rnn_size)
+    )
   end
 
   -- Create the local linear model
   -- Projection should be length x 1
-  local projection = torch.inverse(input_matrix:t() * input_matrix) * input_matrix:t() * output_matrix
+
+  -- Result projection
+  projection:resize(#sentence, opt.rnn_size):zero()
+  -- X:t() * Y
+  base:resize(#sentence, opt.rnn_size):zero()
+  -- X:t() * X
+  modifier:resize(#sentence, #sentence):zero()
+
+  -- Matrix multiply
+  modifier:addmm(0, modifier, 1, input_matrix:t(), input_matrix)
+  -- Invert
+  inverse_modifier:resize(#sentence, #sentence)
+  torch.inverse(inverse_modifier, modifier)
+
+  -- Matrix multiply
+  base:addmm(0, base, 1, input_matrix:t(), output_matrix)
+  -- Matrix multiply
+  projection:addmm(0, projection, 1, inverse_modifier, base)
 
   -- Get affinity for each token in the sentence
   local affinity = {}

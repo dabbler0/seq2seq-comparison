@@ -133,6 +133,8 @@ function deep_totable(tbl)
   return result
 end
 
+local rnn_state = {}
+local activations = torch.CudaTensor()
 function get_all_saliencies(
     alphabet,
     model,
@@ -148,17 +150,17 @@ function get_all_saliencies(
 
   local start = os.clock()
   -- rnn state
-  local rnn_state = {}
   for i=1,2*opt.num_layers do
-    table.insert(rnn_state, torch.Tensor(1, opt.rnn_size):zero():cuda())
+    rnn_state[i] = rnn_state[i] or torch.CudaTensor()
+    rnn_state[i]:resize(1, opt.rnn_size):zero()
   end
 
-  local activations = {}
+  activations:resize(#sentence, opt.rnn_size)
   for t=1,#sentence do
     local inp = {lookup_layer:forward(torch.CudaTensor{sentence[t]})}
     append_table(inp, rnn_state)
     rnn_state = encoder_clones[t]:forward(inp)
-    activations[t] = (rnn_state[#rnn_state][1] - normalizer[1][1]):cdiv(normalizer[2][1])
+    activations[t]:copy(rnn_state[#rnn_state][1]):csub(normalizer[1][1]):cdiv(normalizer[2][1])
   end
   local act_elapsed_time = os.clock()
   print('act elapsed:', act_elapsed_time - start)
@@ -203,23 +205,25 @@ function get_all_saliencies(
       sentence
   )
   local lrp_elapsed_time = os.clock() - start
-  print('lrp elapsed:', sgrad_elapsed_time)
+  print('lrp elapsed:', lrp_elapsed_time)
   start = os.clock()
+
+  printMemProfile()
 
   local lime_saliency = lime(
       alphabet,
       model,
       normalizer,
       sentence,
-      num_perturbations * 10, -- Lime requires many more perturbations than SmoothGrad
+      num_perturbations,
       perturbation_size
   )
-
-  printMemProfile()
 
   local lime_elapsed_time = os.clock() - start
   print('lime elapsed:', lime_elapsed_time)
   start = os.clock()
+
+  printMemProfile()
 
   local erasure_saliency = erasure(
       alphabet,
@@ -228,6 +232,7 @@ function get_all_saliencies(
       sentence
   )
   local erasure_elapsed_time = os.clock() - start
+  print('erasure elapsed:', erasure_elapsed_time)
 
   printMemProfile()
 
@@ -246,7 +251,7 @@ function get_all_saliencies(
       ['erasure'] = erasure_elapsed_time,
       ['sa'] = sa_elapsed_time
     },
-    ['activations'] = activations
+    ['activations'] = activations:totable()
   }
 
 end
@@ -305,15 +310,16 @@ function main()
   local sample_file = io.open(opt.src_file)
 
   local line_no = 1
-  local net_description = {}
   local indices = {}
+
+  local out_file = io.open(opt.out_file, 'w')
 
   while true do
     -- Read line
     local line = sample_file:read("*line")
     if line == nil then break end
 
-    net_description[line_no] = {}
+    local net_description = {}
     local len = token_length(line)
     if opt.max_len > len then
       indices[line_no] = torch.random(1, len)
@@ -350,20 +356,20 @@ function main()
       )
 
       -- Store
-      net_description[line_no][model_name] = saliencies
+      net_description[model_name] = saliencies
     end
+
+    -- Write this line to a line in the output
+    out_file:write(json.encode{
+      ['index'] = indices[line_no],
+      ['line'] = line,
+      ['description'] = net_description
+    })
+    out_file:write('\n')
 
     line_no = line_no + 1
   end
   sample_file:close()
-
-  -- Write
-  local out_file = io.open(opt.out_file)
-  out_file:write(json.encode{
-    ['indices'] = indices,
-    ['descriptions'] = net_description
-  })
-  out_file:close()
 end
 
 main()

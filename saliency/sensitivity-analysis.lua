@@ -1,5 +1,9 @@
 -- Importance as measured by gradients at slightly permuted positions, as described here:
 -- https://arxiv.org/pdf/1706.03825.pdf
+function printMemProfile()
+  free, total = cutorch.getMemoryUsage()
+  print('GPU MEMORY FREE: ', free, 'of', total)
+end
 
 function append_table(dst, src)
   for i = 1, #src do
@@ -15,6 +19,11 @@ function slice_table(t, index)
   return result
 end
 
+local affinities = torch.CudaTensor()
+local sentence_source = torch.CudaLongTensor()
+local first_hidden = {}
+local last_hidden = {}
+
 function sensitivity_analysis(
     alphabet,
     model,
@@ -28,19 +37,18 @@ function sensitivity_analysis(
 
   local mean, stdev = normalizer[1], normalizer[2]
 
-  local affinities = torch.Tensor(length, opt.rnn_size):zero():cuda()
+  affinities:resize(length, opt.rnn_size):zero()
 
   local source_gradients = {}
 
   -- Construct beginning hidden state
-  local first_hidden = {}
   for i=1,2*opt.num_layers do
-    table.insert(
-      first_hidden,
-      --all_params:narrow(1, 1 + length*alphabet_size + opt.rnn_size*(i-1), opt.rnn_size):view(1, opt.rnn_size)
-      torch.Tensor(1, opt.rnn_size):zero():cuda():expand(opt.rnn_size, opt.rnn_size)
-    )
+    first_hidden[i] = first_hidden[i] or torch.CudaTensor()
+    first_hidden[i]:resize(opt.rnn_size, opt.rnn_size):zero()
   end
+
+  print('FIRST CHECKPOINT')
+  printMemProfile()
 
   -- Forward pass
   local rnn_state = first_hidden
@@ -48,7 +56,7 @@ function sensitivity_analysis(
   for t=1,length do
     local encoder_input = {
       lookup_table:forward(
-        torch.Tensor{sentence[t]}:expand(opt.rnn_size)
+        sentence_source:resize(1):fill(sentence[t]):expand(opt.rnn_size)
       )
     }
     append_table(encoder_input, rnn_state)
@@ -56,23 +64,26 @@ function sensitivity_analysis(
     rnn_state = encoder_clones[t]:forward(encoder_input)
   end
 
+  print('SECOND CHECKPOINT')
+  printMemProfile()
+
   -- Backward pass
 
   -- Construct final gradient
-  local last_hidden = {}
-  for i=1,2*opt.num_layers-1 do
-    table.insert(
-      last_hidden,
-      torch.zeros(opt.rnn_size, opt.rnn_size):cuda()
-    )
+  for i=1,2*opt.num_layers do
+    last_hidden[i] = last_hidden[i] or torch.CudaTensor()
+    last_hidden[i]:resize(opt.rnn_size, opt.rnn_size):zero()
   end
 
   -- Diagonal matrix of normalizers. This represents 500 batches, one for each dimensions,
   -- where dimension x is backpropagating relevance for the xth output
-  table.insert(
-    last_hidden,
-    torch.diag(torch.cinv(stdev[1])):cuda()
-  )
+  last_hidden[#last_hidden]:diag(stdev[1]:cinv())
+
+  -- We just inverted stdev[1] so undo that
+  stdev[1]:cinv()
+
+  print('THIRD CHECKPOINT')
+  printMemProfile()
 
   -- Initialize.
   local rnn_state_gradients = {}
@@ -83,7 +94,7 @@ function sensitivity_analysis(
     -- Get source gradients and copy into gradient array
     local final_gradient = encoder_input_gradient[1]
 
-    affinities[t]:copy(final_gradient:pow(2):sum(2))
+    affinities[t]:sum(final_gradient:pow(2), 2)
 
     -- Get RNN state gradients
     rnn_state_gradients[t-1] = slice_table(encoder_input_gradient, 2)

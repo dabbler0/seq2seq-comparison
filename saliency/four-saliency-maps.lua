@@ -142,6 +142,18 @@ function get_all_saliencies(
   lookup_layer = model['lookup']
 
   local start = os.clock()
+
+  -- LRP saliency
+  local layerwise_relevance_saliency = LRP_saliency(
+      alphabet,
+      model,
+      normalizer,
+      sentence
+  )
+  local lrp_elapsed_time = os.clock() - start
+  print('lrp elapsed:', lrp_elapsed_time)
+  start = os.clock()
+
   -- rnn state
   local rnn_state = {}
   for i=1,2*opt.num_layers do
@@ -159,7 +171,8 @@ function get_all_saliencies(
   print('act elapsed:', act_elapsed_time - start)
   start = os.clock()
 
-  --[[
+  print('Actual activation is supposed to be', rnn_state[#rnn_state][1][433])
+
   -- First-derivative sensitivity analysis
   local sa = sensitivity_analysis(
       alphabet,
@@ -170,7 +183,6 @@ function get_all_saliencies(
   local sa_elapsed_time = os.clock() - start
   print('sa elapsed:', sa_elapsed_time)
   start = os.clock()
-  ]]
 
   -- SmoothGrad saliency
   local smooth_grad_saliency = smooth_grad(
@@ -185,23 +197,12 @@ function get_all_saliencies(
   print('sgrad elapsed:', sgrad_elapsed_time)
   start = os.clock()
 
-  -- LRP saliency
-  local layerwise_relevance_saliency = LRP_saliency(
-      alphabet,
-      model,
-      normalizer,
-      sentence
-  )
-  local lrp_elapsed_time = os.clock() - start
-  print('lrp elapsed:', sgrad_elapsed_time)
-  start = os.clock()
-
   local lime_saliency = lime(
       alphabet,
       model,
       normalizer,
       sentence,
-      num_perturbations * 10, -- Lime requires many more perturbations than SmoothGrad
+      num_perturbations, -- Lime requires many more perturbations than SmoothGrad
       perturbation_size
   )
 

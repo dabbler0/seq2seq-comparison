@@ -24,6 +24,8 @@ end
 local first_hidden = {}
 local sequence_inputs = {}
 local input_relevances = torch.CudaTensor()
+local true_final = torch.CudaTensor()
+local initial_relevances = {}
 
 function LRP_saliency(
     alphabet,
@@ -38,9 +40,10 @@ function LRP_saliency(
     first_hidden[i] = first_hidden[i] or torch.CudaTensor()
     first_hidden[i]:resize(opt.rnn_size, opt.rnn_size):zero()
   end
+  --[[
   for i=2*opt.num_layers+1,#first_hidden do
     first_hidden[i] = nil
-  end
+  end]]
 
   -- Forward pass
   local rnn_state = first_hidden
@@ -58,22 +61,19 @@ function LRP_saliency(
   end
 
   -- Relevance
-  local relevances = {}
-  for i=1,2*opt.num_layers-1 do
-    table.insert(
-      relevances,
-      torch.Tensor(opt.rnn_size, opt.rnn_size):zero():cuda()
-    )
-  end -- TODO leak
+  for i=1,2*opt.num_layers do
+    initial_relevances[i] = initial_relevances[i] or torch.CudaTensor()
+    initial_relevances[i]:resize(opt.rnn_size, opt.rnn_size):zero()
+  end
 
-  -- Relevance at point x is f(x) / var(f(x))
-  table.insert(
-    relevances,
-    torch.diag(torch.cdiv(rnn_state[#rnn_state][1], normalizer[2][1])):cuda()
-  )
+  true_final:resizeAs(rnn_state[#rnn_state][1]):
+    copy(rnn_state[#rnn_state][1]):
+    cdiv(normalizer[2][1])
+  initial_relevances[opt.num_layers]:zero():diag(true_final)
 
-  local relevance_state = relevances
   input_relevances:resize(#sentence, opt.rnn_size):zero()
+
+  local relevance_state = initial_relevances
   for t=#sentence,1,-1 do
     relevance_state = LRP(encoder_clones[t], relevance_state)
 
@@ -123,7 +123,21 @@ function LRP(gmodule, R)
     local relevance = relevances[node]
 
     -- Propagate input relevance
+    if type(relevance) == 'table' then
+      local total_sum = 0
+      for i=1,#relevance do total_sum = relevance[i]:sum() + total_sum end
+      print(torch.typename(node.module), 'Propagating. Initial sum is', total_sum)
+    else
+      print(torch.typename(node.module), 'Propagating. Initial sum is', relevance:sum())
+    end
     local input_relevance = relevance_propagate(node, relevance)
+    if type(input_relevance) == 'table' then
+      local total_sum = 0
+      for i=1,#input_relevance do total_sum = input_relevance[i]:sum() + total_sum end
+      print('New sum is', total_sum)
+    else
+      print('New sum is', input_relevance:sum())
+    end
 
     if #node.mapindex == 1 then
       -- Case 1: Select node
@@ -363,11 +377,16 @@ function nn.CAddTable:lrp(input, relevance)
 
   self.sum_inputs:add(self.sign_sum:mul(eps)):cinv()
 
+  print('I BELIEVE relevance is', relevance:sum())
+  local total_sum = 0
   -- Scale relevance as input contributions
   for i=1,#input do
     self.results[i] = self.results[i] or input[1].new()
     self.results[i]:resizeAs(input[i]):copy(input[i]):cmul(self.sum_inputs):cmul(relevance)
+    total_sum = total_sum + self.results[i]:sum()
+    print('Input number', i, 'at this point relevance is', total_sum)
   end
+  print('I NOW BELIEVE relevances is', total_sum)
 
   -- Return
   for i=#input+1,#self.results do
